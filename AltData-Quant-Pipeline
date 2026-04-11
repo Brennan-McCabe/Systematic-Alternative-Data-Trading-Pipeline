@@ -1,4 +1,4 @@
-#use 'python -m pip install [package_name]' to install any missing packages before running this script
+#use 'python -m pip install [package_name]' to install any missing packages before running
 
 # Import the yfinance library to download stock chart data and VIX data
 import yfinance as yf
