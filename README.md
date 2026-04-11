@@ -1,14 +1,12 @@
 The Fat-Tail Hunter: My Journey Building a Quant Trading Bot
 Disclaimer: This is an educational project I built to learn machine learning and data engineering. It is currently running in a paper-trading sandbox. Please do not use this code to trade real money.
 
-📌 How This Started (And How It Escalated)
 This project was originally supposed to be a simple stock prediction script. I wanted to feed 5 years of stock price data (Open, High, Low, Close, Volume) into an XGBoost model and see if it could predict a moving average crossover.
 
 It worked on paper, but I quickly learned a series of hard lessons about the reality of algorithmic trading. Every single complex feature in this repository was built out of necessity to fix a fatal flaw I discovered in my earlier models.
 
 Here is how a simple script turned into a fully automated, alternative-data quantitative pipeline.
 
-🚧 The Evolution of the Bot
 Issue 1: The "Priced In" Reality (Asset Class Selection)
 The Problem: I originally built this model to trade large-cap stocks (like Apple) and ETFs (like SPY). The backtests were terrible. I realized that the large-cap market is hyper-efficient; massive firms like Citadel and Jane Street have already arbitraged away any edge you can find in basic price data.The Solution: I pivoted to the "Wild West" of the market: a basket of 25 Small-Cap stocks. Small-caps are illiquid, highly volatile, and heavily driven by retail sentiment and options flow, leaving actual inefficiencies that a retail algorithmic model can exploit.
 
@@ -24,8 +22,8 @@ The Problem: Even with the new loss function, the AI kept getting trapped in fal
 Issue 5: Manual Execution and Blown Accounts
 The Problem: Even when the AI found a good setup, I couldn't sit at my computer all day to execute it. Furthermore, small-cap stocks are incredibly volatile. A stock could gap down 15% in ten minutes, blowing up my paper account.The Solution: I automated the execution and built a mathematical risk manager. I connected the Alpaca Trading API and scheduled the Python script to run automatically via a daily Cron Job. If the AI approves a trade, it dynamically scales the bet size based on Expected Value, calculates the 14-day Average True Range (ATR), and pegs a Good 'Til Canceled (GTC) 1.5x ATR hard stop-loss directly to the broker to protect capital.
 
-🛠️ Tech Stack
-Language: Python
+Tech Stack
+Language: Python (I used VS)
 
 Machine Learning: XGBoost, Scikit-learn (TimeSeriesSplit)
 
@@ -33,30 +31,32 @@ Data Ingestion: Pandas, Numpy, Requests, Polygon.io Options API
 
 Live Execution: Alpaca Trade API
 
-🚀 How to Run It Locally
+To run it:
+
 1. Clone the repository
 
-Bash
 git clone https://github.com/Brennan-McCabe/Systematic-Alternative-Data-Trading-Pipeline.git
 cd Systematic-Alternative-Data-Trading-Pipeline/AltData-Quant-Pipeline
+
 2. Install dependencies
 
-Bash
 pip install -r requirements.txt
+
 3. Set up your API Keys
 Create a .env file in the root directory. You will need free paper-trading keys from Alpaca and an Options API key from Polygon.
 
-Code snippet
 ALPACA_API_KEY="your_paper_key"
 ALPACA_SECRET_KEY="your_secret_key"
 OPTIONS_API_KEY="your_polygon_key"
+
 4. Run the Pipeline
 
-Bash
 python quant_bot_live.py
-🛣️ What I'm Learning Next
-Building this taught me that the code is the easy part; finding structural alpha is the hard part. My next goals for this project are:
 
-Writing an Exit Script: Right now, the bot enters trades and protects downside risk, but I need to write a secondary script to systematically take profits after a 5-day hold.
+Next Goals:
 
-Limit Order Execution: The bot currently uses Market Orders, which suffer from heavy slippage in illiquid small caps. I am researching how to peg Limit Orders to the bid/ask spread to improve entry prices.
+I'm working on the exit script and there's a few "realism" issues that I've yet to tackle:
+Small-caps are illiquid and bid-ask spreads aren't considered at all yet
+Options have a similar issue with illiquidity, small actions may be amplified by using the put/call ratio on small-caps
+
+This was really just a project with the goal of learning and I've certainly accomplished that, there's still a lot to learn, though.
