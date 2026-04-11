@@ -1,0 +1,180 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+from sklearn.model_selection import TimeSeriesSplit
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# ==========================================
+# 1. BACKTEST CONFIGURATION
+# ==========================================
+HOLD_DAYS = 5
+ATR_MULTIPLIER = 1.5
+MIN_EV_THRESHOLD = 0.10  # Keeping the stricter threshold
+START_DATE = "2021-01-01"
+END_DATE = "2024-01-01"
+
+TICKERS = [
+    "RIOT", "MARA", "PLUG", "FCEL", "RUN", 
+    "AMSC", "PACB", "EDIT", "CRSP", "GPRO", 
+    "GOLF", "YELP", "EXTR", "AGYS", "PRTS", 
+    "BKE", "SAH", "RICK", "WNC", "GATX", 
+    "AAON", "MTH", "LGIH", "WASH", "BANF",
+    "UPST", "SOFI", "PLTR", "AFRM", "HOOD",  
+    "AMC", "GME", "BYND", "CVNA", "SPCE",    
+    "QS", "LCID", "CHPT", "BLNK", "MVIS",    
+    "DKNG", "PENN", "FUBO", "OPEN", "SOUN",  
+    "RKLB", "IONQ", "ROOT", "LMND", "AI"     
+]
+
+# ==========================================
+# 2. THE CUSTOM ASYMMETRIC LOSS FUNCTION
+# ==========================================
+def fat_tail_objective(y_true, y_pred):
+    residual = y_pred - y_true
+    grad = residual
+    hess = np.ones_like(y_true)
+    
+    fat_tail_mask = (y_true > 0.10) & (residual < 0)
+    
+    # Tuned Penalty
+    penalty_multiplier = 15.0
+    grad[fat_tail_mask] *= penalty_multiplier
+    hess[fat_tail_mask] *= penalty_multiplier
+    
+    return grad, hess
+
+# ==========================================
+# 3. HISTORICAL DATA INGESTION & FEATURE ENGINEERING
+# ==========================================
+def build_historical_dataset(tickers):
+    print("Downloading Historical Data and Engineering Features...")
+    all_data = []
+    
+    for ticker in tickers:
+        df = yf.download(ticker, start=START_DATE, end=END_DATE, progress=False)
+        if df.empty:
+            continue
+            
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        # 1. Technical & Volatility Features
+        df['H_L'] = df['High'] - df['Low']
+        df['H_PC'] = abs(df['High'] - df['Close'].shift(1))
+        df['L_PC'] = abs(df['Low'] - df['Close'].shift(1))
+        df['True_Range'] = df[['H_L', 'H_PC', 'L_PC']].max(axis=1)
+        df['ATR_14'] = df['True_Range'].rolling(14).mean()
+        df['ATR_Pct'] = df['ATR_14'] / df['Close']
+        
+        # 2. Proxy Alternative Data (Volume Velocity Shocks)
+        df['Avg_Vol_30'] = df['Volume'].rolling(30).mean()
+        df['Volume_Shock'] = df['Volume'] / df['Avg_Vol_30']
+        
+        # 3. THE REGIME FILTER (New)
+        df['MA_30'] = df['Close'].rolling(30).mean()
+        # Binary flag: 1 if in an uptrend, 0 if in a downtrend
+        df['Trend_Active'] = np.where(df['Close'] > df['MA_30'], 1, 0)
+        
+        # 4. The Target Variable (The Future)
+        df['Future_Close_5d'] = df['Close'].shift(-HOLD_DAYS)
+        df['Future_5d_Low'] = df['Low'].rolling(window=HOLD_DAYS).min().shift(-HOLD_DAYS)
+        df['Target_Return'] = (df['Future_Close_5d'] - df['Close']) / df['Close']
+        
+        df = df.dropna()
+        df['Ticker'] = ticker
+        
+        all_data.append(df)
+        
+    return pd.concat(all_data)
+
+# ==========================================
+# 4. WALK-FORWARD BACKTEST ENGINE
+# ==========================================
+def run_backtest():
+    dataset = build_historical_dataset(TICKERS)
+    dataset = dataset.sort_index()
+    
+    # We don't give the AI the Trend_Active flag to train on; we use it as a hard execution shield
+    features = ['ATR_Pct', 'Volume_Shock']
+    X = dataset[features].values
+    y = dataset['Target_Return'].values
+    
+    closes = dataset['Close'].values
+    future_lows = dataset['Future_5d_Low'].values
+    atrs = dataset['ATR_14'].values
+    trends = dataset['Trend_Active'].values # Extracting the trend flag
+    
+    tscv = TimeSeriesSplit(n_splits=4)
+    
+    print("\n--- Starting Walk-Forward Optimization ---")
+    
+    total_trades = 0
+    winning_trades = 0
+    total_pnl_pct = 0.0
+    
+    fold = 1
+    for train_index, test_index in tscv.split(X):
+        print(f"\nTraining Fold {fold}...")
+        
+        X_train, X_test = X[train_index], X[test_index]
+        y_train, y_test = y[train_index], y[test_index]
+        
+        model = xgb.XGBRegressor(
+            n_estimators=100,
+            learning_rate=0.05,
+            max_depth=3, # Tuned depth
+            objective=fat_tail_objective
+        )
+        
+        model.fit(X_train, y_train)
+        predictions = model.predict(X_test)
+        
+        fold_pnl = 0
+        fold_trades = 0
+        
+        for i in range(len(predictions)):
+            pred_ev = predictions[i]
+            trend_status = trends[test_index][i]
+            
+            # THE HARD SHIELD: Only approve if EV is high AND the stock is above its 30-day MA
+            if pred_ev >= MIN_EV_THRESHOLD and trend_status == 1:
+                fold_trades += 1
+                total_trades += 1
+                
+                actual_return = y_test[i]
+                current_price = closes[test_index][i]
+                atr_dollar = atrs[test_index][i]
+                future_low = future_lows[test_index][i]
+                
+                stop_loss_price = current_price - (atr_dollar * ATR_MULTIPLIER)
+                
+                if future_low <= stop_loss_price:
+                    loss_pct = -((current_price - stop_loss_price) / current_price)
+                    fold_pnl += loss_pct
+                    total_pnl_pct += loss_pct
+                else:
+                    fold_pnl += actual_return
+                    total_pnl_pct += actual_return
+                    if actual_return > 0:
+                        winning_trades += 1
+                        
+        print(f"Fold {fold} Results -> Trades: {fold_trades} | PnL: {fold_pnl * 100:.2f}%")
+        fold += 1
+
+    print("\n==========================================")
+    print("BACKTEST FINAL RESULTS (Out-of-Sample)")
+    print("==========================================")
+    print(f"Total Trades Taken: {total_trades}")
+    if total_trades > 0:
+        win_rate = winning_trades / total_trades
+        print(f"Win Rate: {win_rate * 100:.2f}%")
+        print(f"Gross Expected Value (Total PnL): {total_pnl_pct * 100:.2f}%")
+        print(f"Average Profit/Loss per Trade: {(total_pnl_pct / total_trades) * 100:.2f}%")
+    else:
+        print("No trades taken. Model vetoed all setups.")
+
+if __name__ == "__main__":
+    run_backtest()
