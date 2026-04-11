@@ -2,24 +2,34 @@
 
 # Import the yfinance library to download stock chart data and VIX data
 import yfinance as yf
+
 # Import pandas to handle dataframes (tables of data used for calculations)
 import pandas as pd
+
 # Import numpy for fast mathematical operations and generating random numbers
 import numpy as np
+
 # Import requests to handle HTTP calls to external APIs (like Polygon.io)
 import requests
+
 # Import datetime to timestamp the start of the script
 import datetime
+
 # Import time to pause the script (though rate limiting was removed for paid tiers, it can still be useful)
 import time
+
 # Import the XGBoost Regressor, the machine learning model used to predict Expected Value
 from xgboost import XGBRegressor
+
 # Import Alpaca's TradingClient to connect to the brokerage account
 from alpaca.trading.client import TradingClient
+
 # Import order request structures from Alpaca to build complex trades
 from alpaca.trading.requests import MarketOrderRequest, StopLossRequest
+
 # Import Enums to specify we want to "BUY" and hold "Good 'Til Canceled" (GTC)
 from alpaca.trading.enums import OrderSide, TimeInForce
+
 # Import warnings to suppress annoying terminal output from pandas or yfinance
 import warnings
 
@@ -29,8 +39,12 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. CONFIGURATION & API KEYS
 # ==========================================
+
+#API keys redacted for obvious reasons
+
 # The API Key ID that authenticates you with Alpaca's Paper Trading environment
 ALPACA_API_KEY = "[REDACTED]"
+
 # The Secret Key acting as the password for Alpaca
 ALPACA_SECRET_KEY = "[REDACTED]"
 
@@ -40,14 +54,19 @@ OPTIONS_API_KEY = "[REDACTED]"
 # Portfolio & Risk Settings
 # How long the strategy intends to hold the stock before selling
 HOLD_DAYS = 5
+
 # The multiplier applied to the Average True Range (ATR) to set the hard stop-loss distance
 ATR_MULTIPLIER = 1.5        
+
 # The absolute minimum dollar amount to bet if the AI barely approves a trade (+4% EV)
 MIN_AI_BET = 500            
+
 # The absolute maximum dollar amount to bet if the AI predicts a massive return (>= +10% EV)
 MAX_AI_BET = 2500           
+
 # The Expected Value floor; any prediction below this percentage is instantly rejected
 MIN_EV_THRESHOLD = 0.04     
+
 # The Expected Value ceiling used to calculate the bet scaling ratio
 MAX_EV_CAP = 0.10           
 
@@ -67,9 +86,11 @@ trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
 # ==========================================
 # 2. DATA INGESTION ENGINES
 # ==========================================
+
 # Define a function that takes a ticker symbol and returns its options data
 def get_options_flow(ticker: str) -> dict:
     """Fetches live Options Flow data (P/C Ratio, Volume Shock, IV Rank) from Polygon.io."""
+
     # Wrap the network call in a try/except block so the script doesn't crash if the API goes down
     try:
         # Construct the specific URL to ping Polygon's options snapshot endpoint for the given ticker
@@ -77,6 +98,7 @@ def get_options_flow(ticker: str) -> dict:
         
         # Send the GET request to Polygon and wait for the response
         response = requests.get(url)
+        
         # Parse the text response into a Python dictionary (JSON)
         data = response.json()
         
@@ -87,6 +109,7 @@ def get_options_flow(ticker: str) -> dict:
 
         # Extract the list of options contracts from the 'results' key in the JSON
         results = data.get("results", {})
+       
         # If there are no options contracts available for this stock, return safe baseline data
         if not results:
             return {"Opt_Put_Call_Ratio": 1.0, "Opt_Call_Shock": 1.0, "Opt_IV_Rank": 50.0}
@@ -98,6 +121,7 @@ def get_options_flow(ticker: str) -> dict:
         
         # Loop through every single options contract returned by Polygon
         for contract in results:
+            
             # Extract the specific details and today's trading data for the contract
             details = contract.get("details", {})
             day_data = contract.get("day", {})
@@ -106,6 +130,7 @@ def get_options_flow(ticker: str) -> dict:
             # If the contract is a Call option, add its volume to our running Call total
             if details.get("contract_type") == "call":
                 call_vol += day_data.get("volume", 0)
+            
             # If the contract is a Put option, add its volume to our running Put total
             elif details.get("contract_type") == "put":
                 put_vol += day_data.get("volume", 0)
@@ -119,6 +144,7 @@ def get_options_flow(ticker: str) -> dict:
         
         # Set a hardcoded baseline for normal daily call volume (2,000) for small caps
         avg_expected_call_vol = 2000 
+        
         # Calculate how much today's volume shocked the baseline (e.g., 2.0 means double the normal volume)
         call_shock = call_vol / avg_expected_call_vol if avg_expected_call_vol > 0 else 1.0
         
@@ -127,6 +153,7 @@ def get_options_flow(ticker: str) -> dict:
         
         # Normalize the IV into a 0 to 100 scale, assuming 0.20 is the lowest historical and 1.20 is the highest
         iv_rank = ((avg_iv - 0.20) / (1.20 - 0.20)) * 100
+       
         # Ensure the rank doesn't go below 0 or above 100
         iv_rank = min(max(iv_rank, 0.0), 100.0) 
 
@@ -147,6 +174,7 @@ def get_live_market_features(ticker: str):
     try:
         # Download 1 month of daily stock price data from Yahoo Finance silently
         df = yf.download(ticker, period="1mo", progress=False)
+        
         # If Yahoo returns nothing, exit the function
         if df.empty:
             return None
