@@ -322,7 +322,7 @@ def main():
             "ATR_Pct": market_data["ATR_Pct"],
             "VIX_Fear_Index": market_data["VIX_Fear_Index"]
         }])
-        
+#Another line to change between testing and running        
         # Step E: AI Inference (Predicting Expected Value)
         # NOTE: Once your real model is loaded above, uncomment the line below to get the real prediction:
         # predicted_ev = float(model.predict(live_features)[0])
