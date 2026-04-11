@@ -1,4 +1,3 @@
-The Fat-Tail Hunter: My Journey Building a Quant Trading Bot
 Disclaimer: This is an educational project I built to learn machine learning and data engineering. It is currently running in a paper-trading sandbox. Please do not use this code to trade real money.
 
 This project was originally supposed to be a simple stock prediction script. I wanted to feed 5 years of stock price data (Open, High, Low, Close, Volume) into an XGBoost model and see if it could predict a moving average crossover.
