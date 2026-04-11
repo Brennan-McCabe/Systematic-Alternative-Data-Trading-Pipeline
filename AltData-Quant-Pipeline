@@ -357,6 +357,5 @@ def main():
     # Once the loop has finished checking all 25 stocks, print a completion footer
     print("\n--- Pipeline Execution Complete ---")
 
-# Standard Python idiom to ensure the main() function only runs if this script is executed directly (not imported elsewhere)
 if __name__ == "__main__":
     main()
