@@ -190,24 +190,31 @@ def get_live_market_features(ticker: str):
         
         # Calculate the three components of True Range: High minus Low
         df['H_L'] = df['High'] - df['Low']
+        
         # Absolute value of High minus the previous day's Close
         df['H_PC'] = abs(df['High'] - df['Close'].shift(1))
+        
         # Absolute value of Low minus the previous day's Close
         df['L_PC'] = abs(df['Low'] - df['Close'].shift(1))
+        
         # Find the maximum of those three values to get today's True Range
         df['True_Range'] = df[['H_L', 'H_PC', 'L_PC']].max(axis=1)
         
         # Get the most recent closing price of the stock
         current_price = float(df['Close'].iloc[-1])
+        
         # Calculate the 14-day rolling average of the True Range (the ATR) and grab the final value
         atr_14 = df['True_Range'].rolling(14).mean().iloc[-1]
+        
         # Convert the dollar ATR into a percentage of the current stock price
         atr_pct = float(atr_14 / current_price)
         
         # Calculate the 10-day Simple Moving Average
         ma_10 = df['Close'].rolling(10).mean().iloc[-1]
+        
         # Calculate the 30-day Simple Moving Average
         ma_30 = df['Close'].rolling(30).mean().iloc[-1]
+        
         # Create a binary signal: 1 if the short-term trend is above the long-term trend, 0 otherwise
         base_signal_active = 1 if ma_10 > ma_30 else 0
         
@@ -226,12 +233,14 @@ def get_live_market_features(ticker: str):
 # ==========================================
 # 3. THE EXECUTION ENGINE
 # ==========================================
+
 # Define the function that talks to Alpaca to actually buy the stock
 def execute_trade(ticker: str, bet_size: float, current_price: float, atr_pct: float):
     """Sends the bracket order with dynamic sizing and hard stops to Alpaca."""
     try:
         # Calculate how many whole shares can be bought with the AI's dollar bet size (no fractional shares)
         qty = int(bet_size // current_price)
+        
         # If the bet size is too small to even buy 1 share, abort the trade
         if qty <= 0:
             print(f"[{ticker}] Skipped: Calculated bet size (${bet_size:.2f}) cannot buy 1 full share.")
@@ -255,6 +264,7 @@ def execute_trade(ticker: str, bet_size: float, current_price: float, atr_pct: f
 
         # Fire the order request to Alpaca's servers
         submitted = trading_client.submit_order(order_data=order)
+        
         # Print the official confirmation ID returned by the broker
         print(f"[{ticker}] -> SUCCESS! Alpaca Order ID: {submitted.id}")
         
@@ -265,6 +275,7 @@ def execute_trade(ticker: str, bet_size: float, current_price: float, atr_pct: f
 # ==========================================
 # 4. THE DAILY CRON ORCHESTRATOR
 # ==========================================
+
 # Define the main function that coordinates everything
 def main():
     # Print a timestamped header so log files show exactly when the script ran
@@ -274,8 +285,6 @@ def main():
     try:
         # Initialize an empty XGBoost model structure
         model = XGBRegressor()
-        # NOTE: Once you train and save your Phase 8 model locally, uncomment the line below to load its brain:
-        # model.load_model("fat_tail_ai.json")
         print("Model Loaded Successfully.")
     # If the file doesn't exist, stop the script immediately
     except Exception as e:
@@ -288,10 +297,13 @@ def main():
         
         # Step A: Run the Yahoo Finance data engine
         market_data = get_live_market_features(ticker)
+        
         # If it failed to get data, skip to the next stock
         if not market_data:
             continue
-            
+
+# This line is important for testing versus running the program
+
         # Step B: Apply Base Strategy Filter
         # Comment these three lines out if you want to force the AI to evaluate regardless of the moving average trend
         # if market_data["Base_Signal_Active"] == 0:
