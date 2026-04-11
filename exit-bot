@@ -1,0 +1,92 @@
+import datetime
+import time
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import GetOrdersRequest
+from alpaca.trading.enums import QueryOrderStatus, OrderSide
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# ==========================================
+# 1. CONFIGURATION & API KEYS
+# ==========================================
+ALPACA_API_KEY = "[REDACTED]"
+ALPACA_SECRET_KEY = "[REDACTED]"
+
+# We set this to 7 calendar days to approximate 5 trading days
+HOLD_DAYS_CALENDAR = 7 
+
+# Initialize Alpaca Client
+trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+
+# ==========================================
+# 2. THE EXIT ORCHESTRATOR
+# ==========================================
+def main():
+    print(f"--- Starting Autonomous Exit Engine: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+    
+    try:
+        # Step A: Fetch all currently open positions from Alpaca
+        open_positions = trading_client.get_all_positions()
+        
+        if not open_positions:
+            print("No open positions found. Portfolio is clean.")
+            return
+            
+        print(f"Found {len(open_positions)} open positions. Evaluating hold times...")
+
+        # Step B: Iterate through the portfolio
+        for position in open_positions:
+            ticker = position.symbol
+            current_profit = float(position.unrealized_plpc) * 100 # Profit/Loss percentage
+            
+            print(f"\nAnalyzing [{ticker}] | Current PnL: {current_profit:.2f}%")
+            
+            # Step C: Query the broker for the exact date we bought this stock
+            # We search for the most recent CLOSED BUY order for this specific ticker
+            req = GetOrdersRequest(
+                status=QueryOrderStatus.CLOSED,
+                symbols=[ticker],
+                side=OrderSide.BUY,
+                limit=1 # We only need the most recent entry
+            )
+            
+            order_history = trading_client.get_orders(req)
+            
+            if not order_history:
+                print(f"[{ticker}] Warning: Could not locate original buy order. Skipping.")
+                continue
+                
+            # Step D: Calculate Time Held
+            entry_date = order_history[0].filled_at
+            # Make the current time timezone-aware to match Alpaca's UTC timestamps
+            now = datetime.datetime.now(datetime.timezone.utc) 
+            
+            days_held = (now - entry_date).days
+            
+            print(f"[{ticker}] Held for {days_held} days (Target: {HOLD_DAYS_CALENDAR} days).")
+            
+            # Step E: The Liquidation Trigger
+            if days_held >= HOLD_DAYS_CALENDAR:
+                print(f"[{ticker}] -> TIME LIMIT REACHED. Initiating Liquidation.")
+                
+                try:
+                    # CRITICAL: We use close_position() instead of a manual Sell order. 
+                    # This automatically cancels the pending GTC Stop-Loss bracket and executes a Market Sell.
+                    closed_order = trading_client.close_position(symbol_or_asset_id=ticker)
+                    print(f"[{ticker}] -> SUCCESS! Position liquidated and Stop-Loss canceled. Order ID: {closed_order.id}")
+                except Exception as e:
+                    print(f"[{ticker}] -> FAILED TO LIQUIDATE: {e}")
+            else:
+                print(f"[{ticker}] Holding position. Needs {HOLD_DAYS_CALENDAR - days_held} more days.")
+                
+        # To avoid rate limits if the portfolio grows massive
+        time.sleep(1)
+
+    except Exception as e:
+        print(f"Fatal Error in Exit Engine: {e}")
+
+    print("\n--- Exit Engine Execution Complete ---")
+
+if __name__ == "__main__":
+    main()
