@@ -75,7 +75,7 @@ Next Goals:
 
 I'm working on the exit script and there's a few "realism" issues that I've yet to tackle:
 
-Small-caps are illiquid and bid-ask spreads aren't considered at all yet
+**Slippage** Small-caps are illiquid and bid-ask spreads aren't considered at all yet
 
 Options have a similar issue with illiquidity, small actions may be amplified by using the put/call ratio on small-caps
 
