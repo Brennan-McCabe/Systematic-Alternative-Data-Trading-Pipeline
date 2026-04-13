@@ -1,0 +1,14 @@
+# Data Ingestion & Engineering
+yfinance
+polars
+pandas
+numpy
+requests
+
+# Machine Learning
+xgboost
+scikit-learn
+
+# Brokerage & Environment
+alpaca-py
+python-dotenv
