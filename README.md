@@ -59,13 +59,15 @@ pip install -r requirements.txt
 
 3. Set up your API Keys
 
-Create a .env file in the root directory. You will need free paper-trading keys from Alpaca and an Options API key from Polygon.
+Create a .env file in the root directory. You will need free paper-trading keys from Alpaca and an Options API key from Polygon ($29).
 
 ALPACA_API_KEY="your_paper_key"
 
 ALPACA_SECRET_KEY="your_secret_key"
 
 OPTIONS_API_KEY="your_polygon_key"
+
+I used PythonAnywhere's $10 dev tier 
 
 4. Run the Pipeline
 
