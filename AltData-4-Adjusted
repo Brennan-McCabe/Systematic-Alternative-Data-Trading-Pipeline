@@ -16,9 +16,9 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. CONFIGURATION & API KEYS
 # ==========================================
-ALPACA_API_KEY = "[REDACTED]"
-ALPACA_SECRET_KEY = "[REDACTED]"
-OPTIONS_API_KEY = "[REDACTED]"
+ALPACA_API_KEY = [REDACTED]
+ALPACA_SECRET_KEY = [REDACTED]
+OPTIONS_API_KEY = [REDACTED]
 
 # Backtest-Optimized Risk Parameters
 HOLD_DAYS = 5
@@ -188,7 +188,7 @@ def main():
     try:
         model = XGBRegressor()
         # NOTE: Ensure the saved model was trained using max_depth=3 to prevent over-memorization
-        # model.load_model("fat_tail_ai_tuned.json")
+        model.load_model("fat_tail_ai_tuned.json")
         print("Model Loaded Successfully.")
     except Exception as e:
         print("Failed to load XGBoost model.")
@@ -218,8 +218,8 @@ def main():
         }])
         
         # STEP 3: AI Inference
-        # predicted_ev = float(model.predict(live_features)[0])
-        predicted_ev = np.random.uniform(-0.05, 0.15) 
+        predicted_ev = float(model.predict(live_features)[0])
+        # predicted_ev = np.random.uniform(-0.05, 0.15) 
         
         print(f"[{ticker}] AI Predicts Expected Value: {predicted_ev * 100:.2f}%")
         
