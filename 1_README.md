@@ -41,7 +41,7 @@ Language: Python (I used VS)
 
 Machine Learning: XGBoost, Scikit-learn (TimeSeriesSplit)
 
-Data Ingestion: Pandas, Numpy, Requests, Polygon.io Options API
+Data Ingestion: Polars, Pandas, Numpy, Requests, Polygon.io Options API
 
 Live Execution: Alpaca Trade API
 
@@ -51,7 +51,7 @@ To run it:
 
 git clone https://github.com/Brennan-McCabe/Systematic-Alternative-Data-Trading-Pipeline.git
 
-cd Systematic-Alternative-Data-Trading-Pipeline/AltData-Quant-Pipeline
+cd Systematic-Alternative-Data-Trading-Pipeline/Main
 
 2. Install dependencies
 
@@ -69,13 +69,19 @@ OPTIONS_API_KEY="your_polygon_key"
 
 I used PythonAnywhere's $10 dev tier 
 
-4. Run the Pipeline
+4. Train the model
 
-python quant_bot_live.py
+Run Bot-Trainer
+
+5. Run the model
+
+I setup a scheduled task on PythonAnywhere to run Main.py daily
+
+6. Enable the exit bot
+
+Using PythonAnywhere again, I set exit-bot to run continuously
 
 Next Goals:
-
-I'm working on the exit script and there's a few "realism" issues that I've yet to tackle:
 
 **Slippage** Small-caps are illiquid and bid-ask spreads aren't considered at all yet
 
