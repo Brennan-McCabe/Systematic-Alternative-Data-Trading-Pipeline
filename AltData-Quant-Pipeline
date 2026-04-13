@@ -1,361 +1,1341 @@
-#use 'python -m pip install [package_name]' to install any missing packages before running
+Here is the code in full:
 
-# Import the yfinance library to download stock chart data and VIX data
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Main.py
+
+
 import yfinance as yf
 
-# Import pandas to handle dataframes (tables of data used for calculations)
+import polars as pl
+
 import pandas as pd
 
-# Import numpy for fast mathematical operations and generating random numbers
 import numpy as np
 
-# Import requests to handle HTTP calls to external APIs (like Polygon.io)
 import requests
 
-# Import datetime to timestamp the start of the script
 import datetime
 
-# Import time to pause the script (though rate limiting was removed for paid tiers, it can still be useful)
 import time
 
-# Import the XGBoost Regressor, the machine learning model used to predict Expected Value
 from xgboost import XGBRegressor
 
-# Import Alpaca's TradingClient to connect to the brokerage account
 from alpaca.trading.client import TradingClient
 
-# Import order request structures from Alpaca to build complex trades
 from alpaca.trading.requests import MarketOrderRequest, StopLossRequest
 
-# Import Enums to specify we want to "BUY" and hold "Good 'Til Canceled" (GTC)
 from alpaca.trading.enums import OrderSide, TimeInForce
 
-# Import warnings to suppress annoying terminal output from pandas or yfinance
 import warnings
 
-# Tell Python to ignore standard warning messages to keep the terminal output clean
+import os
+
+from dotenv import load_dotenv
+
+
+
+
+
+
+
+
 warnings.filterwarnings('ignore')
 
+
 # ==========================================
+
 # 1. CONFIGURATION & API KEYS
+
 # ==========================================
 
-#API keys redacted for obvious reasons
 
-# The API Key ID that authenticates you with Alpaca's Paper Trading environment
-ALPACA_API_KEY = "[REDACTED]"
+# Load the hidden .env file
 
-# The Secret Key acting as the password for Alpaca
-ALPACA_SECRET_KEY = "[REDACTED]"
+load_dotenv()
 
-# The API key that unlocks the paid Options data tier on Polygon.io
-OPTIONS_API_KEY = "[REDACTED]"
 
-# Portfolio & Risk Settings
-# How long the strategy intends to hold the stock before selling
+# Pull the keys into your script securely
+
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
+
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+
+OPTIONS_API_KEY = os.getenv("OPTIONS_API_KEY")
+
+
+# Backtest-Optimized Risk Parameters
+
 HOLD_DAYS = 5
 
-# The multiplier applied to the Average True Range (ATR) to set the hard stop-loss distance
 ATR_MULTIPLIER = 1.5        
 
-# The absolute minimum dollar amount to bet if the AI barely approves a trade (+4% EV)
 MIN_AI_BET = 500            
 
-# The absolute maximum dollar amount to bet if the AI predicts a massive return (>= +10% EV)
 MAX_AI_BET = 2500           
 
-# The Expected Value floor; any prediction below this percentage is instantly rejected
-MIN_EV_THRESHOLD = 0.04     
+MIN_EV_THRESHOLD = 0.10     # UPDATED: Increased to 10% to prevent overtrading
 
-# The Expected Value ceiling used to calculate the bet scaling ratio
-MAX_EV_CAP = 0.10           
+MAX_EV_CAP = 0.20           # Scaled up to match the stricter entry threshold
 
-# A Python list containing the exact 25 small-cap ticker symbols the bot will analyze
+
+# Expanded 50-Ticker Basket (High Volatility / Options Heavy)
+
 TICKERS = [
+
+    # Original 25
+
     "RIOT", "MARA", "PLUG", "FCEL", "RUN", 
-    "AMSC", "PACB", "EDIT", "CRSP", 
-    "GPRO", "GOLF", "YELP", "EXTR", "AGYS", 
-    "PRTS", "BKE", "SAH", "RICK",
-    "WNC", "GATX", "AAON", "MTH", "LGIH", 
-    "WASH", "BANF"
+
+    "AMSC", "PACB", "EDIT", "CRSP", "GPRO", 
+
+    "GOLF", "YELP", "EXTR", "AGYS", "PRTS", 
+
+    "BKE", "SAH", "RICK", "WNC", "GATX", 
+
+    "AAON", "MTH", "LGIH", "WASH", "BANF",
+
+    
+
+    # New 25: The Squeeze & Volatility Basket
+
+    "UPST", "SOFI", "PLTR", "AFRM", "HOOD",  
+
+    "AMC", "GME", "BYND", "CVNA", "SPCE",    
+
+    "QS", "LCID", "CHPT", "BLNK", "MVIS",    
+
+    "DKNG", "PENN", "FUBO", "OPEN", "SOUN",  
+
+    "RKLB", "IONQ", "ROOT", "LMND", "AI"     
+
 ]
 
-# Initialize the Alpaca connection using your keys and explicitly setting paper=True for simulated money
+
 trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
 
+
 # ==========================================
+
 # 2. DATA INGESTION ENGINES
+
 # ==========================================
 
-# Define a function that takes a ticker symbol and returns its options data
 def get_options_flow(ticker: str) -> dict:
-    """Fetches live Options Flow data (P/C Ratio, Volume Shock, IV Rank) from Polygon.io."""
 
-    # Wrap the network call in a try/except block so the script doesn't crash if the API goes down
+    """Fetches live Options Flow data from Polygon.io."""
+
     try:
-        # Construct the specific URL to ping Polygon's options snapshot endpoint for the given ticker
+
         url = f"https://api.polygon.io/v3/snapshot/options/{ticker}?apiKey={OPTIONS_API_KEY}"
-        
-        # Send the GET request to Polygon and wait for the response
+
         response = requests.get(url)
-        
-        # Parse the text response into a Python dictionary (JSON)
+
         data = response.json()
+
         
-        # Check if the API call failed (HTTP 200 means OK). If it failed, print the error and return safe baseline data
+
         if response.status_code != 200 or data.get("status") != "OK":
-            print(f"[{ticker}] Options API Error: {data.get('error', 'Unknown Error')}")
+
             return {"Opt_Put_Call_Ratio": 1.0, "Opt_Call_Shock": 1.0, "Opt_IV_Rank": 50.0}
 
-        # Extract the list of options contracts from the 'results' key in the JSON
+
         results = data.get("results", {})
-       
-        # If there are no options contracts available for this stock, return safe baseline data
+
         if not results:
+
             return {"Opt_Put_Call_Ratio": 1.0, "Opt_Call_Shock": 1.0, "Opt_IV_Rank": 50.0}
 
-        # Create variables to keep a running total of Call volume, Put volume, and a list of Implied Volatilities
+
         call_vol = 0
+
         put_vol = 0
+
         current_iv_list = []
+
         
-        # Loop through every single options contract returned by Polygon
+
         for contract in results:
-            
-            # Extract the specific details and today's trading data for the contract
+
             details = contract.get("details", {})
+
             day_data = contract.get("day", {})
+
             iv = contract.get("implied_volatility")
+
             
-            # If the contract is a Call option, add its volume to our running Call total
+
             if details.get("contract_type") == "call":
+
                 call_vol += day_data.get("volume", 0)
-            
-            # If the contract is a Put option, add its volume to our running Put total
+
             elif details.get("contract_type") == "put":
+
                 put_vol += day_data.get("volume", 0)
+
                 
-            # If the contract has an Implied Volatility reading, append it to our list
+
             if iv:
+
                 current_iv_list.append(iv)
+
                 
-        # Calculate the Put/Call ratio. Use max cap of 5.0 to handle extreme outliers or zero call volume
+
         p_c_ratio = min((put_vol / call_vol) if call_vol > 0 else 5.0, 5.0)
-        
-        # Set a hardcoded baseline for normal daily call volume (2,000) for small caps
+
         avg_expected_call_vol = 2000 
-        
-        # Calculate how much today's volume shocked the baseline (e.g., 2.0 means double the normal volume)
+
         call_shock = call_vol / avg_expected_call_vol if avg_expected_call_vol > 0 else 1.0
-        
-        # Calculate the average implied volatility across all contracts for this stock
+
         avg_iv = sum(current_iv_list) / len(current_iv_list) if current_iv_list else 0.50
+
         
-        # Normalize the IV into a 0 to 100 scale, assuming 0.20 is the lowest historical and 1.20 is the highest
+
         iv_rank = ((avg_iv - 0.20) / (1.20 - 0.20)) * 100
-       
-        # Ensure the rank doesn't go below 0 or above 100
+
         iv_rank = min(max(iv_rank, 0.0), 100.0) 
 
-        # Print the live institutional footprints to the terminal so the user can see what the AI sees
+
         print(f"[{ticker}] LIVE OPTIONS DATA -> Calls: {call_vol} | Puts: {put_vol} | P/C: {p_c_ratio:.2f}")
 
-        # Return the engineered features back to the main script as a dictionary
         return {"Opt_Put_Call_Ratio": p_c_ratio, "Opt_Call_Shock": call_shock, "Opt_IV_Rank": iv_rank}
 
-    # If literally anything else breaks (e.g., internet disconnects), catch the error, print it, and return safe baselines
+
     except Exception as e:
+
         print(f"[{ticker}] Failed to fetch real Options Flow: {e}")
+
         return {"Opt_Put_Call_Ratio": 1.0, "Opt_Call_Shock": 1.0, "Opt_IV_Rank": 50.0}
 
-# Define a function to calculate technical chart data (ATR and Moving Averages)
+
 def get_live_market_features(ticker: str):
-    """Pulls recent price action to calculate ATR and Volume Shocks."""
+
+    """Pulls recent price action and calculates technicals/regimes using Polars."""
+
     try:
-        # Download 1 month of daily stock price data from Yahoo Finance silently
-        df = yf.download(ticker, period="1mo", progress=False)
-        
-        # If Yahoo returns nothing, exit the function
-        if df.empty:
+
+        df_pd = yf.download(ticker, period="1mo", progress=False)
+
+        if df_pd.empty:
+
             return None
+
             
-        # Clean up the dataframe columns if Yahoo returns a multi-level index format
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+
+        if isinstance(df_pd.columns, pd.MultiIndex):
+
+            df_pd.columns = df_pd.columns.get_level_values(0)
+
             
-        # Download 5 days of the VIX (Fear Index)
+
+        df_pd = df_pd.reset_index()
+
+        df = pl.from_pandas(df_pd)
+
+            
+
         df_vix = yf.download("^VIX", period="5d", progress=False)
-        # Extract the very last closing price of the VIX, default to 20.0 if it fails
-        current_vix = df_vix['Close'].iloc[-1].item() if not df_vix.empty else 20.0
-        
-        # Calculate the three components of True Range: High minus Low
-        df['H_L'] = df['High'] - df['Low']
-        
-        # Absolute value of High minus the previous day's Close
-        df['H_PC'] = abs(df['High'] - df['Close'].shift(1))
-        
-        # Absolute value of Low minus the previous day's Close
-        df['L_PC'] = abs(df['Low'] - df['Close'].shift(1))
-        
-        # Find the maximum of those three values to get today's True Range
-        df['True_Range'] = df[['H_L', 'H_PC', 'L_PC']].max(axis=1)
-        
-        # Get the most recent closing price of the stock
-        current_price = float(df['Close'].iloc[-1])
-        
-        # Calculate the 14-day rolling average of the True Range (the ATR) and grab the final value
-        atr_14 = df['True_Range'].rolling(14).mean().iloc[-1]
-        
-        # Convert the dollar ATR into a percentage of the current stock price
-        atr_pct = float(atr_14 / current_price)
-        
-        # Calculate the 10-day Simple Moving Average
-        ma_10 = df['Close'].rolling(10).mean().iloc[-1]
-        
-        # Calculate the 30-day Simple Moving Average
-        ma_30 = df['Close'].rolling(30).mean().iloc[-1]
-        
-        # Create a binary signal: 1 if the short-term trend is above the long-term trend, 0 otherwise
-        base_signal_active = 1 if ma_10 > ma_30 else 0
-        
-        # Return all the calculated technical metrics as a dictionary
-        return {
-            "Current_Price": current_price,
-            "ATR_Pct": atr_pct,
-            "VIX_Fear_Index": float(current_vix),
-            "Base_Signal_Active": base_signal_active
-        }
-    # Catch any data downloading or math errors and return None
-    except Exception as e:
-        print(f"[{ticker}] YFinance Error: {e}")
-        return None
 
-# ==========================================
-# 3. THE EXECUTION ENGINE
-# ==========================================
+        current_vix = float(df_vix['Close'].iloc[-1].item()) if not df_vix.empty else 20.0
 
-# Define the function that talks to Alpaca to actually buy the stock
-def execute_trade(ticker: str, bet_size: float, current_price: float, atr_pct: float):
-    """Sends the bracket order with dynamic sizing and hard stops to Alpaca."""
-    try:
-        # Calculate how many whole shares can be bought with the AI's dollar bet size (no fractional shares)
-        qty = int(bet_size // current_price)
         
-        # If the bet size is too small to even buy 1 share, abort the trade
-        if qty <= 0:
-            print(f"[{ticker}] Skipped: Calculated bet size (${bet_size:.2f}) cannot buy 1 full share.")
-            return
 
-        # Calculate the exact dollar price to place the stop-loss: Current Price minus (Current Price * ATR % * 1.5)
-        stop_price = round(current_price * (1 - (atr_pct * ATR_MULTIPLIER)), 2)
+        df = df.with_columns([
 
-        # Print the trade intent to the terminal
-        print(f"[{ticker}] -> EXECUTING TRADE: Buying {qty} shares @ ~${current_price:.2f}. Hard Stop: ${stop_price:.2f}")
+            (pl.col("High") - pl.col("Low")).alias("H_L"),
 
-        # Build the Alpaca Market Order Request object
-        order = MarketOrderRequest(
-            symbol=ticker,                       # The stock to buy
-            qty=qty,                             # The number of shares
-            side=OrderSide.BUY,                  # Buy side
-            time_in_force=TimeInForce.GTC,       # Good 'Til Canceled (the order stays active until filled)
-            # Attach the hard stop-loss directly to the buy order as a bracket
-            stop_loss=StopLossRequest(stop_price=stop_price)
+            (pl.col("High") - pl.col("Close").shift(1)).abs().alias("H_PC"),
+
+            (pl.col("Low") - pl.col("Close").shift(1)).abs().alias("L_PC")
+
+        ])
+
+        
+
+        df = df.with_columns(
+
+            pl.max_horizontal(["H_L", "H_PC", "L_PC"]).alias("True_Range")
+
         )
 
-        # Fire the order request to Alpaca's servers
-        submitted = trading_client.submit_order(order_data=order)
         
-        # Print the official confirmation ID returned by the broker
-        print(f"[{ticker}] -> SUCCESS! Alpaca Order ID: {submitted.id}")
+
+        # Calculate ATR and the 30-Day Moving Average
+
+        df = df.with_columns([
+
+            pl.col("True_Range").rolling_mean(window_size=14).alias("ATR_14"),
+
+            pl.col("Close").rolling_mean(window_size=30).alias("MA_30")
+
+        ])
+
         
-    # Catch any API execution errors (e.g., insufficient buying power, market closed issues)
+
+        last_row = df.tail(1).to_dicts()[0]
+
+        
+
+        current_price = float(last_row["Close"])
+
+        atr_14 = float(last_row["ATR_14"]) if last_row["ATR_14"] is not None else 0.0
+
+        atr_pct = float(atr_14 / current_price) if current_price > 0 else 0.0
+
+        
+
+        ma_30 = float(last_row["MA_30"]) if last_row["MA_30"] is not None else 0.0
+
+        
+
+        # UPDATED: The Macro Regime Filter Shield
+
+        trend_active = 1 if current_price > ma_30 else 0
+
+        
+
+        return {
+
+            "Current_Price": current_price,
+
+            "ATR_Pct": atr_pct,
+
+            "VIX_Fear_Index": current_vix,
+
+            "Trend_Active": trend_active
+
+        }
+
     except Exception as e:
+
+        print(f"[{ticker}] Market Data Error: {e}")
+
+        return None
+
+
+# ==========================================
+
+# 3. THE EXECUTION ENGINE
+
+# ==========================================
+
+def execute_trade(ticker: str, bet_size: float, current_price: float, atr_pct: float):
+
+    """Sends the bracket order to Alpaca."""
+
+    try:
+
+        qty = int(bet_size // current_price)
+
+        if qty <= 0:
+
+            print(f"[{ticker}] Skipped: Bet size too small for 1 share.")
+
+            return
+
+
+        stop_price = round(current_price * (1 - (atr_pct * ATR_MULTIPLIER)), 2)
+
+        print(f"[{ticker}] -> EXECUTING TRADE: Buying {qty} shares @ ~${current_price:.2f}. Hard Stop: ${stop_price:.2f}")
+
+
+        # TODO: To combat slippage identified in backtesting, future iteration should replace 
+
+        # MarketOrderRequest with LimitOrderRequest pegged to the Bid/Ask midpoint.
+
+        order = MarketOrderRequest(
+
+            symbol=ticker,
+
+            qty=qty,
+
+            side=OrderSide.BUY,
+
+            time_in_force=TimeInForce.GTC,
+
+            stop_loss=StopLossRequest(stop_price=stop_price)
+
+        )
+
+
+        submitted = trading_client.submit_order(order_data=order)
+
+        print(f"[{ticker}] -> SUCCESS! Order ID: {submitted.id}")
+
+        
+
+    except Exception as e:
+
         print(f"[{ticker}] -> EXECUTION FAILED: {e}")
 
-# ==========================================
-# 4. THE DAILY CRON ORCHESTRATOR
+
 # ==========================================
 
-# Define the main function that coordinates everything
+# 4. THE DAILY CRON ORCHESTRATOR
+
+# ==========================================
+
 def main():
-    # Print a timestamped header so log files show exactly when the script ran
-    print(f"--- Starting Quantitative Pipeline: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+
+    print(f"--- Starting Fat-Tail Quant Engine: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+
     
-    # 1. Load Pre-trained Fat-Tail XGBoost Model
+
     try:
-        # Initialize an empty XGBoost model structure
+
         model = XGBRegressor()
+
+        # NOTE: Ensure the saved model was trained using max_depth=3 to prevent over-memorization
+
+        model.load_model("fat_tail_ai_tuned.json")
+
         print("Model Loaded Successfully.")
-    # If the file doesn't exist, stop the script immediately
+
     except Exception as e:
-        print("Failed to load XGBoost model. Ensure 'fat_tail_ai.json' exists.")
+
+        print("Failed to load XGBoost model.")
+
         return
 
-    # 2. Iterate through the basket, looking at one stock at a time
+
     for ticker in TICKERS:
+
         print(f"\nAnalyzing [{ticker}]...")
+
         
-        # Step A: Run the Yahoo Finance data engine
+
         market_data = get_live_market_features(ticker)
-        
-        # If it failed to get data, skip to the next stock
+
         if not market_data:
+
             continue
 
-# This line is important for testing versus running the program
-
-        # Step B: Apply Base Strategy Filter
-        # Comment these three lines out if you want to force the AI to evaluate regardless of the moving average trend
-        # if market_data["Base_Signal_Active"] == 0:
-        #     print(f"[{ticker}] Vetoed: 10/30 MA Base Strategy is not active. Ignoring.")
-        #     continue
             
-        # Step C: Run the Polygon Options data engine
+
+        # STEP 1: The Regime Filter Check
+
+        if market_data["Trend_Active"] == 0:
+
+            print(f"[{ticker}] Vetoed: Regime Filter Active (Price below 30-day MA). Shielding capital.")
+
+            continue
+
+            
+
+        # STEP 2: Options Ingestion
+
         options_data = get_options_flow(ticker)
+
         
-        # Step D: Construct the Feature Array for XGBoost
-        # Package all 5 features into a single-row DataFrame, matching the exact order the AI trained on
-        live_features = pd.DataFrame([{
+
+        live_features = pl.DataFrame([{
+
             "Opt_Put_Call_Ratio": options_data["Opt_Put_Call_Ratio"],
+
             "Opt_Call_Shock": options_data["Opt_Call_Shock"],
+
             "Opt_IV_Rank": options_data["Opt_IV_Rank"],
+
             "ATR_Pct": market_data["ATR_Pct"],
+
             "VIX_Fear_Index": market_data["VIX_Fear_Index"]
+
         }])
-#Another line to change between testing and running        
-        # Step E: AI Inference (Predicting Expected Value)
-        # NOTE: Once your real model is loaded above, uncomment the line below to get the real prediction:
-        # predicted_ev = float(model.predict(live_features)[0])
+
         
-        # MOCKING PREDICTION FOR TEMPLATE RUN: Generates a random EV between -5% and +15% for testing execution
-        predicted_ev = np.random.uniform(-0.05, 0.15) 
-        # Print the prediction as a human-readable percentage
+
+        # STEP 3: AI Inference
+
+        predicted_ev = float(model.predict(live_features)[0])
+
+        # predicted_ev = np.random.uniform(-0.05, 0.15) 
+
+        
+
         print(f"[{ticker}] AI Predicts Expected Value: {predicted_ev * 100:.2f}%")
+
         
-        # Step F: Dynamic Position Sizing & Risk Management
-        # Check if the AI's predicted return is higher than our minimum acceptable threshold (4%)
+
+        # STEP 4: Execution & Risk Management
+
         if predicted_ev >= MIN_EV_THRESHOLD:
-            # Calculate a scaling factor (0.0 to 1.0) based on how close the prediction is to the max cap (10%)
+
             scale = min(1.0, max(0.0, (predicted_ev - MIN_EV_THRESHOLD) / (MAX_EV_CAP - MIN_EV_THRESHOLD)))
-            # Linearly scale the bet size between the $500 minimum and the $2,500 maximum using the scale factor
+
             dynamic_bet_size = MIN_AI_BET + ((MAX_AI_BET - MIN_AI_BET) * scale)
+
             
+
             print(f"[{ticker}] SETUP APPROVED. High Conviction Detected. Scaling bet to ${dynamic_bet_size:.2f}")
+
             
-            # Step G: Execution via Alpaca by passing the calculated variables to our execution function
+
             execute_trade(
+
                 ticker=ticker, 
+
                 bet_size=dynamic_bet_size, 
+
                 current_price=market_data["Current_Price"], 
+
                 atr_pct=market_data["ATR_Pct"]
+
             )
-        # If the Expected Value is below 4%, veto the trade and do nothing
+
         else:
-            print(f"[{ticker}] Vetoed: AI Expected Value ({predicted_ev * 100:.2f}%) did not meet {MIN_EV_THRESHOLD * 100}% threshold.")
+
+            print(f"[{ticker}] Vetoed: AI Expected Value ({predicted_ev * 100:.2f}%) did not meet {MIN_EV_THRESHOLD*100}% threshold.")
 
 
-    # Once the loop has finished checking all 25 stocks, print a completion footer
     print("\n--- Pipeline Execution Complete ---")
 
+
 if __name__ == "__main__":
+
     main()
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+exit_engine.py
+
+
+import os
+
+import datetime
+
+import time
+
+import numpy as np
+
+from dotenv import load_dotenv
+
+from alpaca.trading.client import TradingClient
+
+from alpaca.trading.requests import GetOrdersRequest
+
+from alpaca.trading.enums import QueryOrderStatus, OrderSide
+
+import warnings
+
+
+warnings.filterwarnings('ignore')
+
+
+# Load the hidden .env file (Same one your Entry Script uses)
+
+load_dotenv()
+
+
+# ==========================================
+
+# 1. CONFIGURATION & API KEYS
+
+# ==========================================
+
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
+
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+
+
+# Risk & Exit Parameters
+
+HOLD_DAYS_TRADING = 5      # Replaced calendar days with actual market days
+
+TAKE_PROFIT_PCT = 20.0     # Liquidate immediately if profit hits 20%
+
+CHECK_INTERVAL_SEC = 300   # How often the bot checks the portfolio (300s = 5 mins)
+
+
+# Initialize Alpaca Client
+
+trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+
+
+# ==========================================
+
+# 2. THE EXIT ORCHESTRATOR
+
+# ==========================================
+
+def scan_and_liquidate():
+
+    """Single pass of the portfolio to check for exits."""
+
+    try:
+
+        open_positions = trading_client.get_all_positions()
+
+        
+
+        if not open_positions:
+
+            print("No open positions found. Portfolio is clean.")
+
+            return
+
+            
+
+        print(f"Found {len(open_positions)} open positions. Evaluating...")
+
+
+        for position in open_positions:
+
+            ticker = position.symbol
+
+            current_profit = float(position.unrealized_plpc) * 100 
+
+            
+
+            print(f"\nAnalyzing [{ticker}] | Current PnL: {current_profit:.2f}%")
+
+            
+
+            # --- EXIT TRIGGER 1: THE PARABOLIC TAKE-PROFIT ---
+
+            if current_profit >= TAKE_PROFIT_PCT:
+
+                print(f"[{ticker}] -> TAKE PROFIT TRIGGERED! Up {current_profit:.2f}%. Liquidating early.")
+
+                try:
+
+                    closed_order = trading_client.close_position(symbol_or_asset_id=ticker)
+
+                    print(f"[{ticker}] -> SUCCESS. Secured the bag. Order ID: {closed_order.id}")
+
+                except Exception as e:
+
+                    print(f"[{ticker}] -> FAILED TO LIQUIDATE: {e}")
+
+                continue # Skip the time-check and move to the next stock
+
+            
+
+            # --- EXIT TRIGGER 2: THE TIME LIMIT ---
+
+            req = GetOrdersRequest(
+
+                status=QueryOrderStatus.CLOSED,
+
+                symbols=[ticker],
+
+                side=OrderSide.BUY,
+
+                limit=1 
+
+            )
+
+            
+
+            order_history = trading_client.get_orders(req)
+
+            
+
+            if not order_history:
+
+                print(f"[{ticker}] Warning: Could not locate original buy order. Skipping.")
+
+                continue
+
+                
+
+            entry_date = order_history[0].filled_at.date()
+
+            now_date = datetime.datetime.now(datetime.timezone.utc).date()
+
+            
+
+            # Calculate actual business/trading days held (ignores weekends)
+
+            days_held = np.busday_count(entry_date, now_date)
+
+            
+
+            print(f"[{ticker}] Held for {days_held} trading days (Target: {HOLD_DAYS_TRADING} days).")
+
+            
+
+            if days_held >= HOLD_DAYS_TRADING:
+
+                print(f"[{ticker}] -> TIME LIMIT REACHED. Initiating Liquidation.")
+
+                try:
+
+                    closed_order = trading_client.close_position(symbol_or_asset_id=ticker)
+
+                    print(f"[{ticker}] -> SUCCESS! Position liquidated. Order ID: {closed_order.id}")
+
+                except Exception as e:
+
+                    print(f"[{ticker}] -> FAILED TO LIQUIDATE: {e}")
+
+            else:
+
+                print(f"[{ticker}] Holding position. Needs {HOLD_DAYS_TRADING - days_held} more trading days.")
+
+                
+
+            time.sleep(0.5) # API Rate Limit Buffer
+
+
+    except Exception as e:
+
+        print(f"Fatal Error in Exit Scan: {e}")
+
+
+def main():
+
+    print(f"--- Starting Autonomous Exit Engine (Continuous Mode) ---")
+
+    while True:
+
+        print(f"\n--- New Scan Cycle: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+
+        scan_and_liquidate()
+
+        print(f"--- Cycle Complete. Sleeping for {CHECK_INTERVAL_SEC / 60} minutes ---")
+
+        time.sleep(CHECK_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+
+    main()
+
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+train_fat_tail_model.py
+
+
+
+import yfinance as yf
+
+import pandas as pd
+
+import numpy as np
+
+from xgboost import XGBRegressor
+
+from sklearn.model_selection import train_test_split
+
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+import warnings
+
+
+warnings.filterwarnings('ignore')
+
+
+# 1. MATCH THE EXECUTION SCRIPT CONFIGURATION
+
+TICKERS = [
+
+    # Original 25
+
+    "RIOT", "MARA", "PLUG", "FCEL", "RUN", 
+
+    "AMSC", "PACB", "EDIT", "CRSP", "GPRO", 
+
+    "GOLF", "YELP", "EXTR", "AGYS", "PRTS", 
+
+    "BKE", "SAH", "RICK", "WNC", "GATX", 
+
+    "AAON", "MTH", "LGIH", "WASH", "BANF",
+
+    
+
+    # The Squeeze & Volatility Basket
+
+    "UPST", "SOFI", "PLTR", "AFRM", "HOOD",  
+
+    "AMC", "GME", "BYND", "CVNA", "SPCE",    
+
+    "QS", "LCID", "CHPT", "BLNK", "MVIS",    
+
+    "DKNG", "PENN", "FUBO", "OPEN", "SOUN",  
+
+    "RKLB", "IONQ", "ROOT", "LMND", "AI"     
+
+]
+
+
+HOLD_DAYS = 5
+
+YEARS_OF_DATA = 3 # Train on the last 3 years of data
+
+
+def compute_historical_features(ticker: str, vix_df: pd.DataFrame) -> pd.DataFrame:
+
+    """Downloads historical data and engineers the exact features the live model expects."""
+
+    try:
+
+        # 1. Download Price Data
+
+        df = yf.download(ticker, period=f"{YEARS_OF_DATA}y", progress=False)
+
+        if df.empty:
+
+            return pd.DataFrame()
+
+        
+
+        # Flatten MultiIndex if yfinance returns one
+
+        if isinstance(df.columns, pd.MultiIndex):
+
+            df.columns = df.columns.get_level_values(0)
+
+
+        # 2. Calculate ATR (Average True Range)
+
+        df['H_L'] = df['High'] - df['Low']
+
+        df['H_PC'] = abs(df['High'] - df['Close'].shift(1))
+
+        df['L_PC'] = abs(df['Low'] - df['Close'].shift(1))
+
+        df['True_Range'] = df[['H_L', 'H_PC', 'L_PC']].max(axis=1)
+
+        df['ATR_14'] = df['True_Range'].rolling(window=14).mean()
+
+        df['ATR_Pct'] = df['ATR_14'] / df['Close']
+
+
+        # 3. Target Variable: 5-Day Forward Return (Expected Value)
+
+        # What was the percentage return if we bought today and sold in 5 days?
+
+        df['Target_EV'] = (df['Close'].shift(-HOLD_DAYS) - df['Close']) / df['Close']
+
+
+        # 4. Merge VIX Data
+
+        df = df.join(vix_df, how='left')
+
+        df['VIX_Fear_Index'].ffill(inplace=True) # Forward fill any missing VIX days
+
+
+        # ==========================================
+
+        # 5. SYNTHETIC OPTIONS FEATURES (PROXIES)
+
+        # ==========================================
+
+        # Since we don't have historical options data, we mock them using equity volume/volatility proxies
+
+        # so the XGBoost model has the exact shape expected by the live execution script.
+
+        
+
+        # Proxy for Opt_Call_Shock: Ratio of today's equity volume vs 30-day average
+
+        df['Vol_30MA'] = df['Volume'].rolling(window=30).mean()
+
+        df['Opt_Call_Shock'] = df['Volume'] / df['Vol_30MA']
+
+        
+
+        # Proxy for Opt_IV_Rank: Rank of 10-day historical volatility vs 252-day historical volatility
+
+        df['HV_10'] = df['Close'].pct_change().rolling(10).std() * np.sqrt(252)
+
+        df['HV_252'] = df['Close'].pct_change().rolling(252).std() * np.sqrt(252)
+
+        df['Opt_IV_Rank'] = ((df['HV_10'] - df['HV_252'].min()) / (df['HV_252'].max() - df['HV_252'].min())) * 100
+
+        df['Opt_IV_Rank'] = df['Opt_IV_Rank'].clip(0, 100)
+
+
+        # Proxy for Opt_Put_Call_Ratio: Roughly map down-days to higher put volume, up-days to higher call volume
+
+        # Baseline ratio of 1.0, spiked if stock dropped, lowered if stock pumped.
+
+        df['Daily_Return'] = df['Close'].pct_change()
+
+        df['Opt_Put_Call_Ratio'] = 1.0 - (df['Daily_Return'] * 10) 
+
+        df['Opt_Put_Call_Ratio'] = df['Opt_Put_Call_Ratio'].clip(0.1, 5.0)
+
+
+        # Keep only the features the AI needs + the Target
+
+        features = ['Opt_Put_Call_Ratio', 'Opt_Call_Shock', 'Opt_IV_Rank', 'ATR_Pct', 'VIX_Fear_Index', 'Target_EV']
+
+        df = df[features].dropna()
+
+        
+
+        return df
+
+
+    except Exception as e:
+
+        print(f"Failed processing {ticker}: {e}")
+
+        return pd.DataFrame()
+
+
+def main():
+
+    print("--- Starting Fat-Tail Model Training Pipeline ---")
+
+    
+
+    # Download VIX once to save API calls
+
+    print("Fetching Macro VIX Data...")
+
+    vix_df = yf.download("^VIX", period=f"{YEARS_OF_DATA}y", progress=False)
+
+    if isinstance(vix_df.columns, pd.MultiIndex):
+
+        vix_df.columns = vix_df.columns.get_level_values(0)
+
+    vix_df = vix_df[['Close']].rename(columns={'Close': 'VIX_Fear_Index'})
+
+
+    # Build the Master Dataset
+
+    all_data = []
+
+    for ticker in TICKERS:
+
+        print(f"Extracting historical features for [{ticker}]...")
+
+        df = compute_historical_features(ticker, vix_df)
+
+        if not df.empty:
+
+            all_data.append(df)
+
+
+    # Combine all tickers into one massive DataFrame
+
+    master_df = pd.concat(all_data, axis=0)
+
+    print(f"\nDataset compiled: {len(master_df)} total trading days analyzed across {len(TICKERS)} tickers.")
+
+
+    # Define X (Features) and y (Target)
+
+    X = master_df[['Opt_Put_Call_Ratio', 'Opt_Call_Shock', 'Opt_IV_Rank', 'ATR_Pct', 'VIX_Fear_Index']]
+
+    y = master_df['Target_EV']
+
+
+    # Split into chronological training and testing sets (80% train, 20% test)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, shuffle=False)
+
+
+    print("\nTraining XGBoost Regressor...")
+
+    # Using max_depth=3 to prevent over-memorization of noise, as specified in your notes
+
+    model = XGBRegressor(
+
+        n_estimators=150, 
+
+        learning_rate=0.05, 
+
+        max_depth=3,
+
+        subsample=0.8,
+
+        colsample_bytree=0.8,
+
+        random_state=42
+
+    )
+
+
+    model.fit(X_train, y_train)
+
+
+    # Evaluate the model
+
+    predictions = model.predict(X_test)
+
+    mae = mean_absolute_error(y_test, predictions)
+
+    print(f"Model Mean Absolute Error on Test Set: {mae * 100:.2f}%")
+
+
+    # Save the model to disk
+
+    filename = "fat_tail_ai_tuned.json"
+
+    model.save_model(filename)
+
+    print(f"\nSUCCESS: Brain saved as '{filename}'.")
+
+    print("You can now run your live execution script!")
+
+
+if __name__ == "__main__":
+
+    main()
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+
+Backtest.py
+
+
+import yfinance as yf
+
+import pandas as pd
+
+import numpy as np
+
+import xgboost as xgb
+
+from sklearn.model_selection import TimeSeriesSplit
+
+import warnings
+
+
+warnings.filterwarnings('ignore')
+
+
+# ==========================================
+
+# 1. BACKTEST CONFIGURATION
+
+# ==========================================
+
+HOLD_DAYS = 5
+
+ATR_MULTIPLIER = 1.5
+
+MIN_EV_THRESHOLD = 0.10  # Keeping the stricter threshold
+
+START_DATE = "2021-01-01"
+
+END_DATE = "2024-01-01"
+
+
+TICKERS = [
+
+    "RIOT", "MARA", "PLUG", "FCEL", "RUN", 
+
+    "AMSC", "PACB", "EDIT", "CRSP", "GPRO", 
+
+    "GOLF", "YELP", "EXTR", "AGYS", "PRTS", 
+
+    "BKE", "SAH", "RICK", "WNC", "GATX", 
+
+    "AAON", "MTH", "LGIH", "WASH", "BANF",
+
+    "UPST", "SOFI", "PLTR", "AFRM", "HOOD",  
+
+    "AMC", "GME", "BYND", "CVNA", "SPCE",    
+
+    "QS", "LCID", "CHPT", "BLNK", "MVIS",    
+
+    "DKNG", "PENN", "FUBO", "OPEN", "SOUN",  
+
+    "RKLB", "IONQ", "ROOT", "LMND", "AI"     
+
+]
+
+
+# ==========================================
+
+# 2. THE CUSTOM ASYMMETRIC LOSS FUNCTION
+
+# ==========================================
+
+def fat_tail_objective(y_true, y_pred):
+
+    residual = y_pred - y_true
+
+    grad = residual
+
+    hess = np.ones_like(y_true)
+
+    
+
+    fat_tail_mask = (y_true > 0.10) & (residual < 0)
+
+    
+
+    # Tuned Penalty
+
+    penalty_multiplier = 15.0
+
+    grad[fat_tail_mask] *= penalty_multiplier
+
+    hess[fat_tail_mask] *= penalty_multiplier
+
+    
+
+    return grad, hess
+
+
+# ==========================================
+
+# 3. HISTORICAL DATA INGESTION & FEATURE ENGINEERING
+
+# ==========================================
+
+def build_historical_dataset(tickers):
+
+    print("Downloading Historical Data and Engineering Features...")
+
+    all_data = []
+
+    
+
+    for ticker in tickers:
+
+        df = yf.download(ticker, start=START_DATE, end=END_DATE, progress=False)
+
+        if df.empty:
+
+            continue
+
+            
+
+        if isinstance(df.columns, pd.MultiIndex):
+
+            df.columns = df.columns.get_level_values(0)
+
+            
+
+        # 1. Technical & Volatility Features
+
+        df['H_L'] = df['High'] - df['Low']
+
+        df['H_PC'] = abs(df['High'] - df['Close'].shift(1))
+
+        df['L_PC'] = abs(df['Low'] - df['Close'].shift(1))
+
+        df['True_Range'] = df[['H_L', 'H_PC', 'L_PC']].max(axis=1)
+
+        df['ATR_14'] = df['True_Range'].rolling(14).mean()
+
+        df['ATR_Pct'] = df['ATR_14'] / df['Close']
+
+        
+
+        # 2. Proxy Alternative Data (Volume Velocity Shocks)
+
+        df['Avg_Vol_30'] = df['Volume'].rolling(30).mean()
+
+        df['Volume_Shock'] = df['Volume'] / df['Avg_Vol_30']
+
+        
+
+        # 3. THE REGIME FILTER (New)
+
+        df['MA_30'] = df['Close'].rolling(30).mean()
+
+        # Binary flag: 1 if in an uptrend, 0 if in a downtrend
+
+        df['Trend_Active'] = np.where(df['Close'] > df['MA_30'], 1, 0)
+
+        
+
+        # 4. The Target Variable (The Future)
+
+        df['Future_Close_5d'] = df['Close'].shift(-HOLD_DAYS)
+
+        df['Future_5d_Low'] = df['Low'].rolling(window=HOLD_DAYS).min().shift(-HOLD_DAYS)
+
+        df['Target_Return'] = (df['Future_Close_5d'] - df['Close']) / df['Close']
+
+        
+
+        df = df.dropna()
+
+        df['Ticker'] = ticker
+
+        
+
+        all_data.append(df)
+
+        
+
+    return pd.concat(all_data)
+
+
+# ==========================================
+
+# 4. WALK-FORWARD BACKTEST ENGINE
+
+# ==========================================
+
+def run_backtest():
+
+    dataset = build_historical_dataset(TICKERS)
+
+    dataset = dataset.sort_index()
+
+    
+
+    # We don't give the AI the Trend_Active flag to train on; we use it as a hard execution shield
+
+    features = ['ATR_Pct', 'Volume_Shock']
+
+    X = dataset[features].values
+
+    y = dataset['Target_Return'].values
+
+    
+
+    closes = dataset['Close'].values
+
+    future_lows = dataset['Future_5d_Low'].values
+
+    atrs = dataset['ATR_14'].values
+
+    trends = dataset['Trend_Active'].values # Extracting the trend flag
+
+    
+
+    tscv = TimeSeriesSplit(n_splits=4)
+
+    
+
+    print("\n--- Starting Walk-Forward Optimization ---")
+
+    
+
+    total_trades = 0
+
+    winning_trades = 0
+
+    total_pnl_pct = 0.0
+
+    
+
+    fold = 1
+
+    for train_index, test_index in tscv.split(X):
+
+        print(f"\nTraining Fold {fold}...")
+
+        
+
+        X_train, X_test = X[train_index], X[test_index]
+
+        y_train, y_test = y[train_index], y[test_index]
+
+        
+
+        model = xgb.XGBRegressor(
+
+            n_estimators=100,
+
+            learning_rate=0.05,
+
+            max_depth=3, # Tuned depth
+
+            objective=fat_tail_objective
+
+        )
+
+        
+
+        model.fit(X_train, y_train)
+
+        predictions = model.predict(X_test)
+
+        
+
+        fold_pnl = 0
+
+        fold_trades = 0
+
+        
+
+        for i in range(len(predictions)):
+
+            pred_ev = predictions[i]
+
+            trend_status = trends[test_index][i]
+
+            
+
+            # THE HARD SHIELD: Only approve if EV is high AND the stock is above its 30-day MA
+
+            if pred_ev >= MIN_EV_THRESHOLD and trend_status == 1:
+
+                fold_trades += 1
+
+                total_trades += 1
+
+                
+
+                actual_return = y_test[i]
+
+                current_price = closes[test_index][i]
+
+                atr_dollar = atrs[test_index][i]
+
+                future_low = future_lows[test_index][i]
+
+                
+
+                stop_loss_price = current_price - (atr_dollar * ATR_MULTIPLIER)
+
+                
+
+                if future_low <= stop_loss_price:
+
+                    loss_pct = -((current_price - stop_loss_price) / current_price)
+
+                    fold_pnl += loss_pct
+
+                    total_pnl_pct += loss_pct
+
+                else:
+
+                    fold_pnl += actual_return
+
+                    total_pnl_pct += actual_return
+
+                    if actual_return > 0:
+
+                        winning_trades += 1
+
+                        
+
+        print(f"Fold {fold} Results -> Trades: {fold_trades} | PnL: {fold_pnl * 100:.2f}%")
+
+        fold += 1
+
+
+    print("\n==========================================")
+
+    print("BACKTEST FINAL RESULTS (Out-of-Sample)")
+
+    print("==========================================")
+
+    print(f"Total Trades Taken: {total_trades}")
+
+    if total_trades > 0:
+
+        win_rate = winning_trades / total_trades
+
+        print(f"Win Rate: {win_rate * 100:.2f}%")
+
+        print(f"Gross Expected Value (Total PnL): {total_pnl_pct * 100:.2f}%")
+
+        print(f"Average Profit/Loss per Trade: {(total_pnl_pct / total_trades) * 100:.2f}%")
+
+    else:
+
+        print("No trades taken. Model vetoed all setups.")
+
+
+if __name__ == "__main__":
+
+    run_backtest()
