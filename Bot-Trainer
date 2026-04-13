@@ -1,0 +1,145 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# 1. MATCH THE EXECUTION SCRIPT CONFIGURATION
+TICKERS = [
+    # Original 25
+    "RIOT", "MARA", "PLUG", "FCEL", "RUN", 
+    "AMSC", "PACB", "EDIT", "CRSP", "GPRO", 
+    "GOLF", "YELP", "EXTR", "AGYS", "PRTS", 
+    "BKE", "SAH", "RICK", "WNC", "GATX", 
+    "AAON", "MTH", "LGIH", "WASH", "BANF",
+    
+    # The Squeeze & Volatility Basket
+    "UPST", "SOFI", "PLTR", "AFRM", "HOOD",  
+    "AMC", "GME", "BYND", "CVNA", "SPCE",    
+    "QS", "LCID", "CHPT", "BLNK", "MVIS",    
+    "DKNG", "PENN", "FUBO", "OPEN", "SOUN",  
+    "RKLB", "IONQ", "ROOT", "LMND", "AI"     
+]
+
+HOLD_DAYS = 5
+YEARS_OF_DATA = 3 # Train on the last 3 years of data
+
+def compute_historical_features(ticker: str, vix_df: pd.DataFrame) -> pd.DataFrame:
+    """Downloads historical data and engineers the exact features the live model expects."""
+    try:
+        # 1. Download Price Data
+        df = yf.download(ticker, period=f"{YEARS_OF_DATA}y", progress=False)
+        if df.empty:
+            return pd.DataFrame()
+        
+        # Flatten MultiIndex if yfinance returns one
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        # 2. Calculate ATR (Average True Range)
+        df['H_L'] = df['High'] - df['Low']
+        df['H_PC'] = abs(df['High'] - df['Close'].shift(1))
+        df['L_PC'] = abs(df['Low'] - df['Close'].shift(1))
+        df['True_Range'] = df[['H_L', 'H_PC', 'L_PC']].max(axis=1)
+        df['ATR_14'] = df['True_Range'].rolling(window=14).mean()
+        df['ATR_Pct'] = df['ATR_14'] / df['Close']
+
+        # 3. Target Variable: 5-Day Forward Return (Expected Value)
+        # What was the percentage return if we bought today and sold in 5 days?
+        df['Target_EV'] = (df['Close'].shift(-HOLD_DAYS) - df['Close']) / df['Close']
+
+        # 4. Merge VIX Data
+        df = df.join(vix_df, how='left')
+        df['VIX_Fear_Index'].ffill(inplace=True) # Forward fill any missing VIX days
+
+        # ==========================================
+        # 5. SYNTHETIC OPTIONS FEATURES (PROXIES)
+        # ==========================================
+        # Since we don't have historical options data, we mock them using equity volume/volatility proxies
+        # so the XGBoost model has the exact shape expected by the live execution script.
+        
+        # Proxy for Opt_Call_Shock: Ratio of today's equity volume vs 30-day average
+        df['Vol_30MA'] = df['Volume'].rolling(window=30).mean()
+        df['Opt_Call_Shock'] = df['Volume'] / df['Vol_30MA']
+        
+        # Proxy for Opt_IV_Rank: Rank of 10-day historical volatility vs 252-day historical volatility
+        df['HV_10'] = df['Close'].pct_change().rolling(10).std() * np.sqrt(252)
+        df['HV_252'] = df['Close'].pct_change().rolling(252).std() * np.sqrt(252)
+        df['Opt_IV_Rank'] = ((df['HV_10'] - df['HV_252'].min()) / (df['HV_252'].max() - df['HV_252'].min())) * 100
+        df['Opt_IV_Rank'] = df['Opt_IV_Rank'].clip(0, 100)
+
+        # Proxy for Opt_Put_Call_Ratio: Roughly map down-days to higher put volume, up-days to higher call volume
+        # Baseline ratio of 1.0, spiked if stock dropped, lowered if stock pumped.
+        df['Daily_Return'] = df['Close'].pct_change()
+        df['Opt_Put_Call_Ratio'] = 1.0 - (df['Daily_Return'] * 10) 
+        df['Opt_Put_Call_Ratio'] = df['Opt_Put_Call_Ratio'].clip(0.1, 5.0)
+
+        # Keep only the features the AI needs + the Target
+        features = ['Opt_Put_Call_Ratio', 'Opt_Call_Shock', 'Opt_IV_Rank', 'ATR_Pct', 'VIX_Fear_Index', 'Target_EV']
+        df = df[features].dropna()
+        
+        return df
+
+    except Exception as e:
+        print(f"Failed processing {ticker}: {e}")
+        return pd.DataFrame()
+
+def main():
+    print("--- Starting Fat-Tail Model Training Pipeline ---")
+    
+    # Download VIX once to save API calls
+    print("Fetching Macro VIX Data...")
+    vix_df = yf.download("^VIX", period=f"{YEARS_OF_DATA}y", progress=False)
+    if isinstance(vix_df.columns, pd.MultiIndex):
+        vix_df.columns = vix_df.columns.get_level_values(0)
+    vix_df = vix_df[['Close']].rename(columns={'Close': 'VIX_Fear_Index'})
+
+    # Build the Master Dataset
+    all_data = []
+    for ticker in TICKERS:
+        print(f"Extracting historical features for [{ticker}]...")
+        df = compute_historical_features(ticker, vix_df)
+        if not df.empty:
+            all_data.append(df)
+
+    # Combine all tickers into one massive DataFrame
+    master_df = pd.concat(all_data, axis=0)
+    print(f"\nDataset compiled: {len(master_df)} total trading days analyzed across {len(TICKERS)} tickers.")
+
+    # Define X (Features) and y (Target)
+    X = master_df[['Opt_Put_Call_Ratio', 'Opt_Call_Shock', 'Opt_IV_Rank', 'ATR_Pct', 'VIX_Fear_Index']]
+    y = master_df['Target_EV']
+
+    # Split into chronological training and testing sets (80% train, 20% test)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, shuffle=False)
+
+    print("\nTraining XGBoost Regressor...")
+    # Using max_depth=3 to prevent over-memorization of noise, as specified in your notes
+    model = XGBRegressor(
+        n_estimators=150, 
+        learning_rate=0.05, 
+        max_depth=3,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=42
+    )
+
+    model.fit(X_train, y_train)
+
+    # Evaluate the model
+    predictions = model.predict(X_test)
+    mae = mean_absolute_error(y_test, predictions)
+    print(f"Model Mean Absolute Error on Test Set: {mae * 100:.2f}%")
+
+    # Save the model to disk
+    filename = "fat_tail_ai_tuned.json"
+    model.save_model(filename)
+    print(f"\nSUCCESS: Brain saved as '{filename}'.")
+    print("You can now run your live execution script!")
+
+if __name__ == "__main__":
+    main()
