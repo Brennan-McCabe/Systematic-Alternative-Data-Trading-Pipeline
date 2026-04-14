@@ -22,7 +22,7 @@ Issue 3: The ML Model was a "Coward" (The MSE Problem)
 
 The Problem: Once the time-travel bug was fixed, the model used Mean Squared Error (MSE) to evaluate its predictions. MSE treats missing a massive 30% breakout exactly the same as missing a 2% normal daily fluctuation. Because massive breakouts are rare (fat tails), the AI learned the safest mathematical route was to just predict a stock would do nothing. It vetoed every single trade.
 
-The Solution: I dove into the math of XGBoost and wrote a Custom Asymmetric Loss Function. I engineered the gradient and hessian calculations to apply a 50x mathematical penalty if the AI missed a massive runner. This cured the AI's "cowardice" and forced it to optimize for Expected Value (EV) rather than just "safe" accuracy. Later through backtesting, I lowered the 50x penalty to a more reasonable 15x penalty as 50 was an over-correction.
+The Solution: I dove into the math of XGBoost and wrote a Custom Asymmetric Loss Function. I implemented a 50x mathematical penalty if the AI missed a massive run. This cured the AI's "cowardice" and forced it to optimize for Expected Value (EV) rather than just "safe" accuracy. Later through backtesting, I lowered the 50x penalty to a more reasonable 15x penalty as 50 was an over-correction.
 
 Issue 4: Price Data is "Too Slow"
 
