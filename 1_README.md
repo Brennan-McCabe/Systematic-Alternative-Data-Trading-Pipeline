@@ -1,5 +1,7 @@
 Disclaimer: This is an educational project I built to learn machine learning and data engineering. It is currently running in a paper-trading sandbox. Please do not use this code to trade real money.
 
+The current iteration of the model uses XGBoost trained with historical data from yfinance to look for "black swan" events correlated to institutional options movement. The model monitors a batch of 50 small-cap stocks with notable volatility. The bot is then fed live call/put data from Polygon.io's Options API. If the bot calculates ev above a certain percentage, it enters a (capped) proportional position relative to the ev calculated. The bot follows a strict exit strategy of 5-days with a stop-loss calculated at time of execution. All action is performed in an Alpaca paper account. Both buying and selling are done fully autonomously using a daily scheduled task from PythonAnywhere. The exit strategy is run continuously through PythonAnywhere.
+
 This project was originally supposed to be a simple stock prediction script. I wanted to feed 5 years of stock price data (Open, High, Low, Close, Volume) into an XGBoost model and see if it could predict a moving average crossover.
 
 It worked on paper, but I quickly learned a series of hard lessons about the reality of algorithmic trading. Every single complex feature in this repository was built out of necessity to fix a fatal flaw I discovered in my earlier models.
@@ -26,15 +28,15 @@ The Solution: I dove into the math of XGBoost and wrote a Custom Asymmetric Loss
 
 Issue 4: Price Data is "Too Slow"
 
-The Problem: Even with the new loss function, the AI kept getting trapped in false breakouts. I realized that by the time a Moving Average crosses or a chart pattern forms, the institutions are already taking profit. Predicting based on chart data was like driving by looking in the rearview mirror.
+The Problem: Even with the new loss function, the AI kept betting on losing outcomes. I realized that by the time a Moving Average crosses or a chart pattern forms, the institutions are already taking profit. Predicting based on chart data was like driving by looking in the rearview mirror.
 
-The Solution: I threw away the technical indicators and integrated the Polygon.io API to pull real-time Alternative Data. Now, the model looks at Institutional Options Flow (Put/Call ratios and extreme Call Volume shocks). Instead of trying to predict the chart, the AI tracks "smart money" urgency before the stock actually moves.
+The Solution: I threw away the technical indicators and integrated the Polygon.io API to pull real-time Alternative Data. Now, the model looks at Institutional Options Flow (Put/Call ratios and extreme Call Volume shocks). Instead of trying to predict the chart, the AI tracks "smart money" and follows before the shift is completely priced in.
 
-Issue 5: Manual Execution and Blown Accounts
+Issue 5: Manual Execution and Speed
 
 The Problem: Even when the AI found a good setup, I couldn't sit at my computer all day to execute it. Furthermore, small-cap stocks are incredibly volatile. A stock could gap down 15% in ten minutes, blowing up my paper account.
 
-The Solution: I automated the execution and built a mathematical risk manager. I connected the Alpaca Trading API and scheduled the Python script to run automatically via a daily Cron Job. If the AI approves a trade, it dynamically scales the bet size based on Expected Value, calculates the 14-day Average True Range (ATR), and pegs a Good 'Til Canceled (GTC) 1.5x ATR hard stop-loss directly to the broker to protect capital.
+The Solution: I automated the execution and built a mathematical risk manager. I connected the Alpaca Trading API and scheduled the Python script to run automatically via a script and PythonAnywhere. If the AI approves a trade, it dynamically scales the bet size based on Expected Value, calculates the 14-day Average True Range (ATR), and pegs a Good 'Til Canceled (GTC) 1.5x ATR hard stop-loss directly to the broker to protect capital.
 
 Tech Stack
 Language: Python (I used VS)
