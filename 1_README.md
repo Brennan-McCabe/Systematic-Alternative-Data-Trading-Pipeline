@@ -1,92 +1,107 @@
-Disclaimer: This is an educational project I built to learn machine learning and data engineering. It is currently running in a paper-trading sandbox. Please do not use this code to trade real money.
+# Systematic Alternative Data Trading Pipeline
 
-The current iteration of the model uses XGBoost trained with historical data from yfinance to look for "black swan" events correlated to institutional options movement. The model monitors a batch of 50 small-cap stocks with notable volatility. The bot is then fed live call/put data from Polygon.io's Options API. If the bot calculates ev above a certain percentage, it enters a (capped) proportional position relative to the ev calculated. The bot follows a strict exit strategy of 5-days with a stop-loss calculated at time of execution. All action is performed in an Alpaca paper account. Both buying and selling are done fully autonomously using a daily scheduled task from PythonAnywhere. The exit strategy is run continuously through PythonAnywhere.
+**Disclaimer:** This is an educational project I built to learn machine learning, data engineering, and quantitative finance. It is currently running in a paper-trading sandbox. Please do not use this code to trade real money.
 
-This project was originally supposed to be a simple stock prediction script. I wanted to feed 5 years of stock price data (Open, High, Low, Close, Volume) into an XGBoost model and see if it could predict a moving average crossover.
+### Overview
 
-It worked on paper, but I quickly learned a series of hard lessons about the reality of algorithmic trading. Every single complex feature in this repository was built out of necessity to fix a fatal flaw I discovered in my earlier models.
+The current iteration of this project is a high-frequency statistical arbitrage pipeline. The XGBoost model monitors a basket of 50 volatile small-cap stocks, feeding on live institutional options flow (Call/Put volume and implied volatility shocks) via Polygon.io.
 
-Here is how a simple script turned into a fully automated, alternative-data quantitative pipeline.
+If the model detects an Expected Value (EV) edge above a strict 2% threshold, it automatically executes a dynamically sized position. Risk is managed natively on the broker side using tight, dynamic trailing stops to lock in profits, while a secondary exit engine continuously prunes stagnant, sideways-trading positions to free up capital. All actions are performed fully autonomously in an Alpaca paper account using scheduled cron tasks.
 
-Issue 1: The "Priced In" Reality (Asset Class Selection)
+---
 
-The Problem: I originally built this model to trade large-cap stocks (like Apple) and ETFs (like SPY). The backtests were terrible. I realized that the large-cap market is hyper-efficient; massive firms like Citadel and Jane Street have already arbitraged away any edge you can find in basic price data.
+### The Evolution: Hard Lessons in Algorithmic Trading
 
-The Solution: I pivoted to the "Wild West" of the market: a basket of 25 (or 50 in some iterations) Small-Cap stocks. Small-caps are illiquid, highly volatile, and heavily driven by retail sentiment and options flow, leaving actual inefficiencies that a retail algorithmic model can exploit.
+This project was originally supposed to be a simple stock prediction script. I wanted to feed 5 years of stock price data into an XGBoost model and see if it could predict a moving average crossover.
 
-Issue 2: The 79% Mirage (Data Leakage)
+It worked on paper, but I quickly learned a series of hard lessons about the reality of algorithmic trading. Every single complex feature in this repository was built out of necessity to fix a fatal flaw I discovered in earlier models. Here is how a simple script turned into a fully automated, alternative-data quantitative pipeline.
 
-The Problem: After pivoting to small-caps, my XGBoost model suddenly showed a ridiculous 79% annual return in backtesting. It meant I had either cracked the market or something was broken. In reality, the model was cheating. Because I was using a standard ML train_test_split (random K-Fold cross-validation), the model was training on Wednesday's data, testing on Monday's data, and using the "future" to predict the past.
+#### Issue 1: The "Priced In" Reality (Asset Class Selection)
 
-The Solution: I threw out standard ML validation and implemented Scikit-learn's TimeSeriesSplit. This forces the model to strictly "walk forward" in time, never seeing future data. My returns crashed back down to reality, but it forced me to build a system that actually worked instead of a time machine.
+**The Problem:** I originally built this model to trade large-cap stocks (like Apple) and ETFs (like SPY). The backtests were terrible. I realized that the large-cap market is hyper-efficient; massive firms have already arbitraged away any edge you can find in basic price data.
+**The Solution:** I pivoted to the "Wild West" of the market: a basket of 50 Small-Cap stocks. Small-caps are illiquid, highly volatile, and heavily driven by retail sentiment and options flow, leaving actual inefficiencies that a retail algorithmic model can exploit.
 
-Issue 3: The ML Model was a "Coward" (The MSE Problem)
+#### Issue 2: The 79% Mirage (Data Leakage)
 
-The Problem: Once the time-travel bug was fixed, the model used Mean Squared Error (MSE) to evaluate its predictions. MSE treats missing a massive 30% breakout exactly the same as missing a 2% normal daily fluctuation. Because massive breakouts are rare (fat tails), the AI learned the safest mathematical route was to just predict a stock would do nothing. It vetoed every single trade.
+**The Problem:** After pivoting to small-caps, my XGBoost model suddenly showed a ridiculous 79% annual return in backtesting. It meant I had either cracked the market or something was broken. In reality, the model was cheating. By using a standard ML `train_test_split`, the model was training on Wednesday's data, testing on Monday's data, and using the "future" to predict the past.
+**The Solution:** I threw out standard ML validation and implemented Scikit-learn's `TimeSeriesSplit`. This forces the model to strictly "walk forward" in time, never seeing future data. My returns crashed back down to reality, but it forced me to build a system that actually worked instead of a time machine.
 
-The Solution: I dove into the math of XGBoost and wrote a Custom Asymmetric Loss Function. I implemented a 50x mathematical penalty if the AI missed a massive run. This cured the AI's "cowardice" and forced it to optimize for Expected Value (EV) rather than just "safe" accuracy. Later through backtesting, I lowered the 50x penalty to a more reasonable 15x penalty as 50 was an over-correction.
+#### Issue 3: Price Data is "Too Slow"
 
-Issue 4: Price Data is "Too Slow"
+**The Problem:** The AI kept betting on losing outcomes. I realized that by the time a chart pattern forms, the institutions are already taking profit. Predicting based on chart data was like driving by looking in the rearview mirror.
+**The Solution:** I threw away the technical indicators and integrated the Polygon.io API to pull real-time Alternative Data. Now, the model looks at Institutional Options Flow (Put/Call ratios and extreme Call Volume shocks). Instead of trying to predict the chart, the AI tracks "smart money" and follows before the shift is completely priced in.
 
-The Problem: Even with the new loss function, the AI kept betting on losing outcomes. I realized that by the time a Moving Average crosses or a chart pattern forms, the institutions are already taking profit. Predicting based on chart data was like driving by looking in the rearview mirror.
+#### Issue 4: The Train-Serve Skew (The Proxy Problem)
 
-The Solution: I threw away the technical indicators and integrated the Polygon.io API to pull real-time Alternative Data. Now, the model looks at Institutional Options Flow (Put/Call ratios and extreme Call Volume shocks). Instead of trying to predict the chart, the AI tracks "smart money" and follows before the shift is completely priced in.
+**The Problem:** Because historical options data is incredibly expensive, I tried to backtest my model using synthetic equity volume proxies to simulate history. I realized this created a massive statistical disconnect—my model was training on fake proxies but trading on real options data in production.
+**The Solution:** I threw out the proxies and built a forward-logger (`options_ingestion.py`). Now, the pipeline runs daily to collect and log pristine, live-sampled Polygon data. The model strictly trains on the exact same data distributions it sees in the live market.
 
-Issue 5: Manual Execution and Speed
+#### Issue 5: Hunting Black Swans is a Trap (The Strategy Pivot)
 
-The Problem: Even when the AI found a good setup, I couldn't sit at my computer all day to execute it. Furthermore, small-cap stocks are incredibly volatile. A stock could gap down 15% in ten minutes, blowing up my paper account.
+**The Problem:** For a long time, the pipeline used a custom asymmetric loss function to hunt for massive 20% "fat tail" breakouts. But relying on rare black swans meant suffering through a terrible win rate and heavy drawdowns.
+**The Solution:** I pivoted the architecture to a higher-frequency statistical edge model. I lowered the execution threshold to 2% and replaced static hard stops with dynamic trailing stops via Alpaca. Instead of hunting for massive home runs, the bot now aggressively locks in smaller, frequent wins as the options flow pushes the stock up.
 
-The Solution: I automated the execution and built a mathematical risk manager. I connected the Alpaca Trading API and scheduled the Python script to run automatically via a script and PythonAnywhere. If the AI approves a trade, it dynamically scales the bet size based on Expected Value, calculates the 14-day Average True Range (ATR), and pegs a Good 'Til Canceled (GTC) 1.5x ATR hard stop-loss directly to the broker to protect capital.
+#### Issue 6: Exit Engine Bloat (State Management)
 
-Tech Stack
-Language: Python (I used VS)
+**The Problem:** My original exit engine aggressively queried Alpaca's API history to manage complex take-profit brackets and hard stops, which was brittle and prone to failure.
+**The Solution:** I handed risk management entirely over to Alpaca's native servers using `TrailingStopLossRequest`. Now, the `exit_engine.py` is just a lightweight stagnation pruner that automatically frees up capital if a stock trades sideways for two days.
 
-Machine Learning: XGBoost, Scikit-learn (TimeSeriesSplit)
+---
 
-Data Ingestion: Polars, Pandas, Numpy, Requests, Polygon.io Options API
+### Tech Stack
 
-Live Execution: Alpaca Trade API
+* **Language:** Python
+* **Machine Learning:** XGBoost, Scikit-learn (`TimeSeriesSplit`)
+* **Data Ingestion & Engineering:** Polars, Pandas, Numpy, Requests
+* **APIs:** Polygon.io (Options Flow), Alpaca Trade API (Execution), Yahoo Finance (Macro/VIX)
+* **Automation:** PythonAnywhere scheduled tasks
 
-To run it:
+---
 
-1. Clone the repository
+### How to Run the Pipeline
 
+**1. Clone the repository**
+
+```bash
 git clone https://github.com/Brennan-McCabe/Systematic-Alternative-Data-Trading-Pipeline.git
+cd Systematic-Alternative-Data-Trading-Pipeline
 
-cd Systematic-Alternative-Data-Trading-Pipeline/Main
+```
 
-2. Install dependencies
+**2. Install dependencies**
 
+```bash
 pip install -r requirements.txt
 
-3. Set up your API Keys
+```
 
-Create a .env file in the root directory. You will need free paper-trading keys from Alpaca and an Options API key from Polygon ($29).
+**3. Set up your API Keys**
+Create a `.env` file in the root directory. You will need free paper-trading keys from Alpaca and an Options API key from Polygon ($29/mo).
 
+```env
 ALPACA_API_KEY="your_paper_key"
-
 ALPACA_SECRET_KEY="your_secret_key"
-
 OPTIONS_API_KEY="your_polygon_key"
 
-I used PythonAnywhere's $10 dev tier 
+```
 
-4. Train the model
+**4. Build the Dataset (Daily)**
+Schedule `options_ingestion.py` to run daily after market close. This builds the historical `.csv` of pristine options flow required for training.
 
-Run Bot-Trainer
+**5. Train the Model**
+Once you have enough logged data, run `research_pipeline.py`. This utilizes strict walk-forward cross-validation to evaluate the strategy and exports the production `options_flow_model_v1.json` file.
 
-5. Run the model
+**6. Live Execution**
+Schedule `Main.py` to run autonomously (e.g., via PythonAnywhere).
 
-I setup a scheduled task on PythonAnywhere to run Main.py daily
+**7. Stagnation Management**
+Run `exit_engine.py` as a continuous or highly frequent scheduled task to prune trades that have stalled out.
 
-6. Enable the exit bot
+---
 
-Using PythonAnywhere again, I set exit-bot to run continuously
+### Next Goals
 
-Next Goals:
+* **Slippage Management:** Small-caps are illiquid and bid-ask spreads aren't factored into the current market order execution. The next major update will replace `MarketOrderRequest` with `LimitOrderRequest` dynamically pegged to the NBBO midpoint.
+* **Options Illiquidity:** Small actions may be amplified by using the put/call ratio on highly illiquid small-cap options chains, which requires a new smoothing function in the ingestion script.
 
-**Slippage** Small-caps are illiquid and bid-ask spreads aren't considered at all yet
-
-Options have a similar issue with illiquidity, small actions may be amplified by using the put/call ratio on small-caps
-
-This was really just a project with the goal of learning and I've certainly accomplished that, there's still a lot to learn, though.
+*This was really just a project with the goal of learning and I've certainly accomplished that, but there's still a lot to learn.*
