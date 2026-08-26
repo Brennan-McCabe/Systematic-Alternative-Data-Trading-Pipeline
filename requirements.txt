@@ -1,0 +1,8 @@
+databento>=0.85.0
+polars>=1.39.3
+xgboost>=3.2.0
+yfinance>=1.2.1
+ib_async>=2.1.0
+python-dotenv>=1.2.2
+scikit-learn>=1.8.0
+pandas>=3.0.2
