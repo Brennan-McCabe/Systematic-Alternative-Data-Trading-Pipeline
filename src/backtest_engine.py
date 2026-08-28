@@ -5,9 +5,10 @@ import numpy as np
 # ==========================================
 # CONFIGURATION
 # ==========================================
-DATASET_PATH = "data/xgboost_training_data.parquet"  # <-- Update this line
-CONFIDENCE_THRESHOLD = 0.001
-TRAIN_SPLIT = 0.80          # Train on first 80%, test on last 20%
+DATASET_PATH = "data/xgboost_training_data.parquet"
+CONFIDENCE_THRESHOLD = 0.001  # 0.1% EV prediction required to trade
+TRAIN_SPLIT = 0.80            # Train on first 80%, test on last 20%
+FRICTION_BPS = 0.0005         # 5 basis points (0.05%) round-trip penalty
 
 def run_out_of_sample_backtest():
     print("Loading historical data for out-of-sample backtest...")
@@ -15,7 +16,7 @@ def run_out_of_sample_backtest():
     # 1. Load Data
     df = pl.read_parquet(DATASET_PATH)
     
-    # Ensure data is sorted chronologically to prevent future-peeking
+    # Ensure data is sorted chronologically
     df = df.sort("timestamp_1m")
     
     # 2. Chronological Train/Test Split
@@ -28,7 +29,6 @@ def run_out_of_sample_backtest():
     
     X_train = train_df.select(features).to_numpy()
     y_train = train_df.select(target).to_numpy().ravel()
-    
     X_test = test_df.select(features).to_numpy()
     
     # 3. Train the Simulation Model
@@ -41,38 +41,48 @@ def run_out_of_sample_backtest():
     predictions = sim_model.predict(X_test)
     test_df = test_df.with_columns(pl.Series("Predicted_EV", predictions))
     
-    # 5. Simulate Trading Logic on the Holdout Set
+    # 5. Simulate Trading Logic with Slippage/Friction
+    # Calculate Theoretical (Gross) Return
     test_df = test_df.with_columns(
         pl.when(pl.col("Predicted_EV") >= CONFIDENCE_THRESHOLD)
         .then(pl.col("Realized_Target_EV"))
         .otherwise(0.0)
-        .alias("Strategy_Return")
+        .alias("Gross_Return")
     )
     
-    # 6. Calculate Portfolio Equity Curve
+    # Calculate Realistic (Net) Return after the 5 bps tax
     test_df = test_df.with_columns(
-        (1 + pl.col("Strategy_Return")).cum_prod().alias("Equity_Curve")
+        pl.when(pl.col("Predicted_EV") >= CONFIDENCE_THRESHOLD)
+        .then(pl.col("Realized_Target_EV") - FRICTION_BPS)
+        .otherwise(0.0)
+        .alias("Net_Return")
+    )
+    
+    # 6. Calculate Portfolio Equity Curve (Based on Net Returns)
+    test_df = test_df.with_columns(
+        (1 + pl.col("Net_Return")).cum_prod().alias("Equity_Curve")
     )
     
     # 7. Extract Quantifiable Metrics
-    strategy_returns = test_df.filter(pl.col("Strategy_Return") != 0.0)["Strategy_Return"].to_numpy()
+    net_returns = test_df.filter(pl.col("Net_Return") != 0.0)["Net_Return"].to_numpy()
     
-    if len(strategy_returns) == 0:
-        print("\nNo trades triggered in the holdout set. The confidence threshold may be too high for this time period.")
+    if len(net_returns) == 0:
+        print("\nNo trades triggered in the holdout set.")
         return
         
-    total_trades = len(strategy_returns)
-    winning_trades = len(strategy_returns[strategy_returns > 0])
+    total_trades = len(net_returns)
+    winning_trades = len(net_returns[net_returns > 0])
     win_rate = winning_trades / total_trades
     
-    cumulative_return = test_df["Equity_Curve"][-1] - 1.0
+    gross_cumulative = (1 + test_df["Gross_Return"]).cum_prod()[-1] - 1.0
+    net_cumulative = test_df["Equity_Curve"][-1] - 1.0
     
-    # Annualized Sharpe Ratio 
-    mean_return = np.mean(strategy_returns)
-    std_return = np.std(strategy_returns)
+    # Annualized Sharpe Ratio (Net)
+    mean_return = np.mean(net_returns)
+    std_return = np.std(net_returns)
     sharpe_ratio = (mean_return / std_return) * np.sqrt(252 * 390) if std_return > 0 else 0
     
-    # Maximum Drawdown
+    # Maximum Drawdown (Net)
     equity_curve = test_df["Equity_Curve"].to_numpy()
     rolling_max = np.maximum.accumulate(equity_curve)
     drawdowns = (equity_curve - rolling_max) / rolling_max
@@ -82,12 +92,16 @@ def run_out_of_sample_backtest():
     # OOS TEAR SHEET OUTPUT
     # ==========================================
     print("\n" + "="*40)
-    print("OUT-OF-SAMPLE TEAR SHEET".center(40))
+    print("OUT-OF-SAMPLE TEAR SHEET (FRICTION APPLIED)".center(40))
     print("="*40)
     print(f"Total Trades Taken:   {total_trades}")
-    print(f"Win Rate:             {win_rate * 100:.2f}%")
-    print(f"Cumulative Return:    {cumulative_return * 100:.2f}%")
-    print(f"Max Drawdown:         {max_drawdown * 100:.2f}%")
+    print(f"Win Rate (Net):       {win_rate * 100:.2f}%")
+    print("-" * 40)
+    print(f"Gross Return:         {gross_cumulative * 100:.2f}%")
+    print(f"Net Return:           {net_cumulative * 100:.2f}%")
+    print(f"Lost to Friction:     {(gross_cumulative - net_cumulative) * 100:.2f}%")
+    print("-" * 40)
+    print(f"Max Drawdown (Net):   {max_drawdown * 100:.2f}%")
     print(f"Est. Sharpe Ratio:    {sharpe_ratio:.2f}")
     print("="*40)
 
