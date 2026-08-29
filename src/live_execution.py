@@ -1,15 +1,21 @@
 import os
 import csv
 import math
+import logging
 import asyncio
 import threading
+import numpy as np
 import polars as pl
 import xgboost as xgb
-import numpy as np
 from datetime import datetime
 from dotenv import load_dotenv
-from ib_async import IB, Stock, MarketOrder, Order
 from alpaca.data.live import StockDataStream
+from ib_async import IB, Stock, MarketOrder, Order
+
+# ==========================================
+# 0. MUTE VERBOSE LIBRARY LOGGING
+# ==========================================
+logging.getLogger('ib_async').setLevel(logging.CRITICAL)
 
 # ==========================================
 # CONFIGURATION & CREDENTIALS
@@ -24,10 +30,10 @@ LOG_FILE = os.path.join(BASE_DIR, "execution_log.csv")
 
 # Strategy Parameters
 SYMBOL = "MSFT"
-CONFIDENCE_THRESHOLD = 0.001  # 0.1% expected value required for order execution
-BASE_ALLOCATION = 0.30        # Baseline capital deployment
-MAX_ALLOCATION = 0.95         # Maximum portfolio exposure limit
-STOP_LOSS_PCT = 0.5           # Trailing stop-loss percentage
+CONFIDENCE_THRESHOLD = 0.001  
+BASE_ALLOCATION = 0.30        
+MAX_ALLOCATION = 0.95         
+STOP_LOSS_PCT = 0.5           
 
 # Global State Variables
 ib = None  
@@ -36,10 +42,25 @@ model = xgb.XGBRegressor()
 is_in_cooldown = False
 
 # ==========================================
-# 0. EXECUTION LOGGING
+# 1. CUSTOM ERROR HANDLERS (Clean Output)
 # ==========================================
+def on_broker_error(reqId, errorCode, errorString, contract):
+    """Filters out expected noise and cleanly formats real broker errors."""
+    # 10089: Delayed market data (expected for paper accounts)
+    # 2109: Outside RTH ignored (expected for Market orders)
+    # 10349: TIF DAY canceled (expected on weekends)
+    ignored_codes = [10089, 2109, 10349]
+    
+    if errorCode in ignored_codes:
+        return
+        
+    print(f"[BROKER MESSAGE] Code {errorCode}: {errorString}")
+
+def on_order_cancel(trade):
+    """Replaces massive Trade object dumps with a clean cancellation notice."""
+    print(f"[EXECUTION CANCELLED] Exchange rejected order {trade.order.orderId} (Market Closed).")
+
 def initialize_logger():
-    """Initializes the CSV execution log and writes headers if the file does not exist."""
     if not os.path.exists(LOG_FILE):
         with open(LOG_FILE, mode='w', newline='') as file:
             writer = csv.writer(file)
@@ -47,17 +68,16 @@ def initialize_logger():
         print(f"[SYSTEM] Initialized execution log at: {LOG_FILE}")
 
 # ==========================================
-# 1. MARKET DATA STREAM (Daemonized)
+# 2. MARKET DATA STREAM (Daemonized)
 # ==========================================
 async def alpaca_handler(bar):
     print(f"[MARKET DATA] {SYMBOL} 1m Bar | Close: ${bar.close:.2f} | Vol: {bar.volume}")
 
 def run_alpaca_silently():
-    """Executes the Alpaca WebSocket stream within a background daemon thread."""
     try:
         alpaca_stream.run()
     except Exception:
-        pass  # Handle thread termination exceptions gracefully during shutdown
+        pass  
 
 async def start_alpaca_stream():
     global alpaca_stream
@@ -65,11 +85,9 @@ async def start_alpaca_stream():
         alpaca_stream = StockDataStream(ALPACA_API_KEY, ALPACA_SECRET_KEY)
         alpaca_stream.subscribe_bars(alpaca_handler, SYMBOL)
         
-        # Initialize the stream as a daemon thread to ensure immediate termination upon script exit
         stream_thread = threading.Thread(target=run_alpaca_silently, daemon=True)
         stream_thread.start()
         
-        # Maintain asynchronous task execution state
         while stream_thread.is_alive():
             await asyncio.sleep(1)
             
@@ -77,10 +95,9 @@ async def start_alpaca_stream():
         print(f"[MARKET DATA ERROR] Stream initialization failed: {e}")
 
 # ==========================================
-# 2. EXECUTION LOGIC (Sizing & Routing)
+# 3. EXECUTION LOGIC (Sizing & Routing)
 # ==========================================
 async def cooldown_timer():
-    """Prevents duplicate order execution by enforcing a minimum time delay between trades."""
     global is_in_cooldown
     await asyncio.sleep(5)
     is_in_cooldown = False
@@ -93,7 +110,6 @@ async def execute_trade(predicted_ev):
         
     print(f"\n[INFERENCE] Target threshold exceeded. Predicted EV: {predicted_ev*100:.3f}%")
     
-    # Retrieve synchronized account state
     available_funds = 0.0
     for item in ib.accountValues():
         if item.tag in ['AvailableFunds', 'BuyingPower', 'NetLiquidation']:
@@ -109,7 +125,6 @@ async def execute_trade(predicted_ev):
         print("[EXECUTION ERROR] Failed to retrieve synchronized account state. Order bypassed.")
         return
 
-    # Position Sizing Calculation (Bounded Linear Scaling)
     allocation_pct = min(MAX_ALLOCATION, BASE_ALLOCATION * (predicted_ev / CONFIDENCE_THRESHOLD))
     capital_to_deploy = available_funds * allocation_pct
     
@@ -117,7 +132,6 @@ async def execute_trade(predicted_ev):
     await ib.qualifyContractsAsync(contract)
     tickers = await ib.reqTickersAsync(contract)
     
-    # Market price retrieval with offline/NaN contingency handling
     current_price = tickers[0].marketPrice()
     if math.isnan(current_price) or current_price <= 0:
         current_price = tickers[0].close
@@ -132,7 +146,6 @@ async def execute_trade(predicted_ev):
 
     print(f"[EXECUTION] Routing {shares_to_buy} shares @ ~${current_price:.2f} | Allocation: {allocation_pct*100:.1f}%")
     
-    # Construct Bracket Order (Includes Extended Hours Flags)
     parent = MarketOrder('BUY', shares_to_buy, transmit=False, outsideRth=True)
     stop = Order(
         action='SELL',
@@ -148,7 +161,6 @@ async def execute_trade(predicted_ev):
     ib.placeOrder(contract, parent)
     ib.placeOrder(contract, stop)
     
-    # Append execution data to local CSV log
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(LOG_FILE, mode='a', newline='') as file:
         writer = csv.writer(file)
@@ -167,7 +179,7 @@ async def execute_trade(predicted_ev):
     asyncio.create_task(cooldown_timer())
 
 # ==========================================
-# 3. DATA REPLAY ENGINE 
+# 4. DATA REPLAY ENGINE 
 # ==========================================
 async def start_parquet_replay_stream():
     print("[SYSTEM] Initializing historical data replay engine...")
@@ -205,6 +217,10 @@ async def main():
     
     global ib
     ib = IB()
+    
+    # Wire the custom event handlers
+    ib.errorEvent += on_broker_error
+    ib.cancelOrderEvent += on_order_cancel
     
     try:
         await ib.connectAsync('127.0.0.1', 4002, clientId=1)
