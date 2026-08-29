@@ -26,14 +26,12 @@ MAX_ALLOCATION = 0.95         # 95% max capital cap
 STOP_LOSS_PCT = 0.5           # 0.5% trailing stop
 
 # Initialize Global Variables safely
-ib = None  # Initialized dynamically inside the event loop
+ib = None  
 model = xgb.XGBRegressor()
-
-# State Tracking
 is_in_cooldown = False
 
 # ==========================================
-# 1. ALPACA EQUITY STREAM (Silent on Weekends)
+# 1. ALPACA EQUITY STREAM 
 # ==========================================
 async def alpaca_handler(bar):
     print(f"[ALPACA] {SYMBOL} 1m Bar | Close: ${bar.close:.2f} | Vol: {bar.volume}")
@@ -51,7 +49,6 @@ async def start_alpaca_stream():
 # ==========================================
 async def cooldown_timer():
     global is_in_cooldown
-    # 5-second cooldown for the replay test (900s in live production)
     await asyncio.sleep(5)
     is_in_cooldown = False
 
@@ -63,33 +60,28 @@ async def execute_trade(predicted_ev):
         
     print(f"\n*** HIGH-CONVICTION SIGNAL: EV {predicted_ev*100:.3f}% ***")
     
-    # Pull live account balance safely via async pull
-    try:
-        account_summary = await ib.reqAccountSummaryAsync()
-    except Exception as e:
-        print(f"[ERROR] Account summary request failed: {e}")
-        return
-
+    # ---------------------------------------------------------
+    # INSTANT CACHE READ (No Async Pulls, No API Rate Limits)
+    # ---------------------------------------------------------
     available_funds = 0.0
-    for item in account_summary:
+    for item in ib.accountValues():
         if item.tag in ['AvailableFunds', 'BuyingPower', 'NetLiquidation']:
             try:
-                available_funds = float(item.value)
-                if available_funds > 0:
+                val = float(item.value)
+                if val > 0:
+                    available_funds = val
                     break
             except ValueError:
                 continue
                 
     if available_funds <= 0:
-        raw_tags = list(set([item.tag for item in account_summary]))
-        print(f"[ERROR] Could not locate capital. Available IBKR tags: {raw_tags[:15]}...")
+        print("[CRITICAL ERROR] Account cache empty or desynced. Aborting trade.")
         return
 
     # Bounded Linear Scaling Math
     allocation_pct = min(MAX_ALLOCATION, BASE_ALLOCATION * (predicted_ev / CONFIDENCE_THRESHOLD))
     capital_to_deploy = available_funds * allocation_pct
     
-    # Get latest price to calculate share quantity
     contract = Stock(SYMBOL, 'SMART', 'USD')
     await ib.qualifyContractsAsync(contract)
     tickers = await ib.reqTickersAsync(contract)
@@ -99,7 +91,7 @@ async def execute_trade(predicted_ev):
     if math.isnan(current_price) or current_price <= 0:
         current_price = tickers[0].close
     if math.isnan(current_price) or current_price <= 0:
-        current_price = 415.0  # Hard fallback for offline weekend execution
+        current_price = 415.0  
     
     shares_to_buy = int(capital_to_deploy // current_price)
     
@@ -109,14 +101,16 @@ async def execute_trade(predicted_ev):
 
     print(f" -> Routing order: {shares_to_buy} shares @ ~${current_price:.2f} (Allocated {allocation_pct*100:.1f}%)")
     
-    # Bracket Order: Market Entry + Trailing Stop
-    parent = MarketOrder('BUY', shares_to_buy, transmit=False)
+    # Bracket Order with Weekend Queue Flags
+    parent = MarketOrder('BUY', shares_to_buy, transmit=False, outsideRth=True)
     stop = Order(
         action='SELL',
         orderType='TRAIL',
         totalQuantity=shares_to_buy,
         trailingPercent=STOP_LOSS_PCT,
         parentId=parent.orderId,
+        tif='GTC',
+        outsideRth=True,
         transmit=True
     )
     
@@ -124,17 +118,15 @@ async def execute_trade(predicted_ev):
     ib.placeOrder(contract, stop)
     print(f" -> Execution complete. Trailing stop armed at {STOP_LOSS_PCT}%.")
     
-    # Trigger non-blocking cooldown
     is_in_cooldown = True
     asyncio.create_task(cooldown_timer())
 
 # ==========================================
-# 3. MARKET REPLAY ENGINE (The AI Brain)
+# 3. MARKET REPLAY ENGINE 
 # ==========================================
 async def start_parquet_replay_stream():
     print(" -> [REPLAY] Initializing Local Data Replay Engine...")
     
-    # Train/load the model temporarily
     df = pl.read_parquet(DATASET_PATH).sort("timestamp_1m")
     X_train = df.select(["opt_put_call_ratio", "opt_call_shock"]).to_numpy()
     y_train = df.select("Realized_Target_EV").to_numpy().ravel()
@@ -146,7 +138,6 @@ async def start_parquet_replay_stream():
         ratio = row["opt_put_call_ratio"]
         shock = row["opt_call_shock"]
         
-        # Predict EV
         features = np.array([[ratio, shock]])
         predicted_ev = model.predict(features)[0]
         
@@ -155,7 +146,7 @@ async def start_parquet_replay_stream():
         if predicted_ev >= CONFIDENCE_THRESHOLD:
             await execute_trade(predicted_ev)
             
-        await asyncio.sleep(0.5)  # Stream at 2 ticks per second
+        await asyncio.sleep(0.5) 
 
 # ==========================================
 # MAIN EVENT LOOP
@@ -165,15 +156,24 @@ async def main():
     print(" STARTING LIVE EXECUTION PIPELINE")
     print("========================================")
     
-    # Initialize IB strictly inside the active event loop
     global ib
     ib = IB()
     
     try:
-        # Connect to IBKR Gateway Paper Trading
         await ib.connectAsync('127.0.0.1', 4002, clientId=1)
         print(" -> [BROKER] Connected to Interactive Brokers.")
         
+        # Give TWS a moment to securely transmit the managed accounts list
+        await asyncio.sleep(1)
+        accounts = ib.managedAccounts()
+        account_id = accounts[0] if accounts else ''
+        
+        # BYPASS THE IB_ASYNC WRAPPER
+        # Talk directly to the raw socket client to force a background sync without crashing the loop
+        ib.client.reqAccountUpdates(True, account_id)
+        print(f" -> [BROKER] Background sync activated for account: {account_id}")
+        await asyncio.sleep(2)  # Give the stream 2 seconds to cache the initial ledger
+            
     except Exception as e:
         print(f" -> [BROKER ERROR] Ensure TWS/Gateway is open and API is enabled: {e}")
         return
