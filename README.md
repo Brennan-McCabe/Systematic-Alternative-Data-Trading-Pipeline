@@ -12,18 +12,19 @@ Sudden shifts in options order flow—such as anomalous volume spikes or rapid c
 ```text
 Pipeline/
 │
-├── .env.example          # Template for required environment variables
+├── .env.example          # Template for required environment variables (Alpaca/IBKR)
 ├── .gitignore            # Excludes sensitive data, parquets, and local checkpoints
 ├── requirements.txt      # Core project dependencies
 ├── README.md             # Project documentation and thesis
 │
 ├── data/                 # Local directory for cached binary/parquet tapes
 ├── models/               # Saved production model checkpoints (.json)
+├── execution_log.csv     # Automated out-of-sample forward-testing ledger
 │
 └── src/                  # Core modules
     ├── options_pipeline.py   # Databento OPRA ingestion & Polars feature engineering
     ├── model_training.py     # TimeSeriesSplit cross-validation & XGBoost optimization
-    └── live_execution.py     # IBKR TWS live socket integration & execution loop
+    └── live_execution.py     # Dual-broker async execution loop (Alpaca Data + IBKR Routing)
 
 ```
 
@@ -49,8 +50,10 @@ Pipeline/
 
 ### 4. Live Execution Bridge (`live_execution.py`)
 
-* **Socket Integration:** The execution script interfaces with Interactive Brokers Trader Workstation (TWS) via local sockets. We use the `ib_async` library because it natively handles the complex asynchronous event loops required to maintain a stable connection to the broker.
-* **Dynamic Evaluation:** The script polls the latest options metrics and feeds them into the saved XGBoost model (`options_flow_model_v1.json`). If the predicted Expected Value (EV) clears our confidence threshold, the script automatically sends a bracket order to the market.
+* **Dual-Broker Architecture:** The pipeline leverages Alpaca WebSockets for high-throughput, latency-sensitive equity data feeds while utilizing Interactive Brokers (IBKR Gateway) strictly for institutional order routing and portfolio management.
+* **Thread Safety & Daemonization:** The Alpaca stream is decoupled into a background daemon thread. This isolates the blocking WebSocket stream from the core `asyncio` event loop, preventing `ib_async` collisions and eliminating "zombie" processes during graceful `Ctrl+C` shutdowns.
+* **Non-Blocking State Synchronization:** Account liquidity is continuously cached in the background using direct low-level socket requests (`ib.client.reqAccountUpdates`). This bypasses aggressive broker API rate limits and provides instant read-access for the execution logic without halting the event loop.
+* **Dynamic Sizing & Bracket Routing:** Capital is dynamically deployed (bounded between a 30% base and 95% maximum) using linear scaling against the predicted EV. Orders are routed as bracket sequences (Market Entry + GTC Trailing Stop) equipped with automated local CSV logging for out-of-sample forward testing validation.
 
 ---
 
@@ -59,7 +62,7 @@ Pipeline/
 ### 1. Initial Thesis & Conceptual Soundness
 
 * **Economic Rationale:** High-frequency options market microstructure acts as a leading indicator. Sudden imbalances in put/call ratios and anomalous call volume shocks reflect aggressive directional positioning prior to equity price discovery.
-* **Risk & Limitations:** The strategy is vulnerable to liquidity gaps and spread widening during major macroeconomic news releases. Furthermore, high-frequency signals can decay rapidly, meaning execution latency is a primary risk factor.
+* **Risk & Limitations:** The strategy is vulnerable to liquidity gaps and spread widening during major macroeconomic news releases. Furthermore, high-frequency signals can decay rapidly, meaning execution latency is a primary risk factor. Absolute returns may also trail passive benchmark holding strategies strictly due to the aggressive risk-management parameters (0.5% stop-loss) dampening top-end volatility.
 
 ### 2. General Model Description
 
@@ -75,7 +78,7 @@ Pipeline/
 
 * **`src/options_pipeline.py`:** Handles the API requests, manages local data caching, and performs the mathematical aggregations required to map options trades to equity timestamps.
 * **`src/model_training.py`:** Conducts the expanding-window cross-validation, generates the error metrics (MAE), and exports the final fitted model for production use.
-* **`src/live_execution.py`:** Manages the real-time continuous loop, evaluating incoming data against the model and pushing execution instructions to the broker API.
+* **`src/live_execution.py`:** Manages the real-time continuous loop, evaluating incoming data against the model, calculating dynamic capital allocations, and securely pushing bracket execution instructions to the broker API.
 
 ```
 
