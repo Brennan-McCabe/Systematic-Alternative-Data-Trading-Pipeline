@@ -19,11 +19,14 @@ Pipeline/
 │
 ├── data/                 # Local directory for cached binary/parquet tapes
 ├── models/               # Saved production model checkpoints (.json)
+├── archive/              # Legacy scripts and deprecated experimental files
 ├── execution_log.csv     # Automated out-of-sample forward-testing ledger
 │
 └── src/                  # Core modules
-    ├── options_pipeline.py   # Databento OPRA ingestion & Polars feature engineering
-    ├── model_training.py     # TimeSeriesSplit cross-validation & XGBoost optimization
+    ├── __init__.py           # Package initializer
+    ├── backtest_engine.py    # Historical strategy simulation and performance metrics
+    ├── model_training.py     # TimeSeriesSplit cross-validation and XGBoost optimization
+    ├── options_pipeline.py   # Databento OPRA ingestion and Polars feature engineering
     └── live_execution.py     # Dual-broker async execution loop (Alpaca Data + IBKR Routing)
 
 ```
