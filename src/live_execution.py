@@ -1,96 +1,87 @@
-import time
-import polars as pl
-import xgboost as xgb
-from ib_async import IB, Stock, MarketOrder
+import os
+import asyncio
+import databento as db
+from dotenv import load_dotenv
+from alpaca.data.live import StockDataStream
 
 # ==========================================
-# CONFIGURATION
+# CONFIGURATION & CREDENTIALS
 # ==========================================
-SYMBOL = "MSFT"
-MODEL_PATH = "options_flow_model_v1.json"
-DATASET_PATH = "xgboost_training_data.parquet"
-STOP_LOSS_PCT = 0.005        # 0.5% trailing stop
-CONFIDENCE_THRESHOLD = 0.004 # Minimum predicted EV (0.4%) to trigger entry
+load_dotenv()
+DATABENTO_API_KEY = os.getenv("DATABENTO_API_KEY")
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 
-def get_latest_market_metrics() -> tuple[float, float]:
-    """
-    Pulls the most recent high-frequency options metrics from the local parquet cache.
-    (In a full live deployment, replace this function with your real-time WebSocket/API listener).
-    """
-    df = pl.read_parquet(DATASET_PATH)
-    # Sort by timestamp and grab the absolute latest row
-    latest_row = df.sort("timestamp_1m").tail(1)
-    
-    ratio = float(latest_row["opt_put_call_ratio"][0])
-    shock = float(latest_row["opt_call_shock"][0])
-    return ratio, shock
+# Global counter to prevent terminal freeze from OPRA firehose
+opra_tick_count = 0
 
-def run_execution_loop():
-    print("Initializing Live Execution Engine...")
-    
-    # 1. Load the XGBoost Model Brain
-    model = xgb.XGBRegressor()
-    model.load_model(MODEL_PATH)
-    print(f"Loaded model successfully from {MODEL_PATH}")
-    
-    # 2. Connect to IBKR TWS Gateway
-    ib = IB()
+# ==========================================
+# 1. ALPACA EQUITY STREAM (1-Minute Bars)
+# ==========================================
+async def alpaca_handler(bar):
+    # This fires exactly once per minute when Alpaca closes a candle
+    print(f"[ALPACA] MSFT 1m Bar | Close: ${bar.close:.2f} | Vol: {bar.volume}")
+
+async def start_alpaca_stream():
+    print(" -> [ALPACA] Initializing Equity WebSocket...")
     try:
-        ib.connect('127.0.0.1', 4002, clientId=1)
-        print("Connected to TWS Gateway for Live Execution.")
+        stream = StockDataStream(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+        stream.subscribe_bars(alpaca_handler, "MSFT")
+        
+        # Run stream in a background thread to prevent blocking the async loop
+        await asyncio.to_thread(stream.run)
     except Exception as e:
-        print(f"Failed to connect to IBKR: {e}")
-        return
+        print(f" -> [ALPACA] Stream Error: {e}")
 
-    # Define the underlying asset contract
-    contract = Stock(SYMBOL, 'SMART', 'USD')
-    ib.qualifyContracts(contract)
-
-    print(f"\nMonitoring institutional flow for {SYMBOL}...")
-    print("Press Ctrl+C to halt execution.\n")
-
+# ==========================================
+# 2. DATABENTO OPRA STREAM (Tick Data)
+# ==========================================
+def databento_worker():
+    global opra_tick_count
+    print(" -> [DATABENTO] Initializing Live OPRA Tape...")
     try:
-        while True:
-            # 3. Pull real features dynamically instead of using hardcoded values
-            try:
-                current_put_call_ratio, current_call_shock = get_latest_market_metrics()
-            except Exception as read_err:
-                print(f"[{time.strftime('%H:%M:%S সিস্ট')}] Error reading local feature feed: {read_err}")
-                time.sleep(10)
-                continue
-            
-            # Format features into the shape expected by XGBoost
-            features = [[current_put_call_ratio, current_call_shock]]
-            
-            # 4. Predict Expected Value (EV) via Model
-            predicted_ev = model.predict(features)[0]
-            
-            print(f"[{time.strftime('%H:%M:%S')}] Signal Checked | Ratio: {current_put_call_ratio:.4f} | Shock: {current_call_shock:.4f} | Pred EV: {predicted_ev*100:.3f}%")
-            
-            # 5. Execution Logic Trigger
-            if predicted_ev >= CONFIDENCE_THRESHOLD:
-                print(f"*** HIGH-CONVICTION SIGNAL DETECTED (EV: {predicted_ev*100:.3f}%) ***")
-                print(f"Executing market order for {SYMBOL} with {STOP_LOSS_PCT*100}% trailing stop...")
+        # NOTE: This requires the $199/mo standard live plan to authenticate properly
+        client = db.Live(DATABENTO_API_KEY)
+        client.subscribe(
+            dataset="OPRA.PILLAR",
+            symbols="MSFT.OPT",
+            stype_in="parent",
+            schema="trades"
+        )
+        client.start()
+        
+        for record in client:
+            if isinstance(record, db.TradeMsg):
+                opra_tick_count += 1
                 
-                # Place a standard market entry order via IBKR
-                order = MarketOrder('BUY', 10) # 10 shares test size
-                trade = ib.placOrder(contract, order)
-                
-                ib.sleep(1)
-                print(f"Order status: {trade.orderStatus.status}")
-                
-                # Cooldown period after firing a trade
-                time.sleep(60)
-            
-            # Poll every 60 seconds to match the 1-minute interval structure
-            time.sleep(60)
-            
-    except KeyboardInterrupt:
-        print("\nExecution halted by user. Disconnecting...")
-    finally:
-        if ib.isConnected():
-            ib.disconnect()
-            print("Disconnected cleanly from IBKR.")
+                # Console Throttle: Print a heartbeat every 5,000 trades
+                if opra_tick_count % 5000 == 0:
+                    print(f"[DATABENTO] OPRA Heartbeat | Processed {opra_tick_count} options trades...")
+                    
+    except Exception as e:
+        print(f" -> [DATABENTO] Stream Error: {e}")
+
+async def start_databento_stream():
+    # Databento's standard client is blocking, so we isolate it in a thread
+    await asyncio.to_thread(databento_worker)
+
+# ==========================================
+# MAIN EVENT LOOP
+# ==========================================
+async def main():
+    print("========================================")
+    print(" STARTING LIVE INGESTION ENGINE")
+    print("========================================")
+    print("Listening for real-time market data... (Awaiting market open)")
+    
+    # Launch both WebSocket listeners concurrently
+    await asyncio.gather(
+        start_alpaca_stream(),
+        start_databento_stream()
+    )
 
 if __name__ == "__main__":
-    run_execution_loop()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nShutting down live ingestion engine...")
