@@ -1,9 +1,9 @@
 # Systematic Alternative Data Trading Pipeline
 
-A quantitative trading pipeline that ingests high-frequency options data, engineers path-dependent targets, trains machine learning models without look-ahead bias, and executes automated orders via Interactive Brokers.
+This project is an exploration into building a complete quantitative trading pipeline from scratch. It walks through ingesting high-frequency options data, engineering targets that survive real-world execution, training a machine learning model without look-ahead bias, and finally deploying it to a live brokerage environment.
 
-## Quantitative Thesis
-Sudden shifts in options order flow—such as anomalous volume spikes or rapid changes in the Put/Call ratio—often reflect informed trading activity that precedes short-term price movements in the underlying equity. By tracking these high-frequency signals and applying a strict stop-loss framework to our historical data, we can train a model to identify momentum setups that are realistic to execute and survive market volatility.
+## The Core Concept
+The underlying hypothesis of this pipeline is that options market microstructure acts as a leading indicator. When unusual volume spikes or put/call ratios shift rapidly, it often signals aggressive, informed positioning just before the underlying equity moves. This project tests whether tracking these high-frequency shifts—paired with strict risk management—can reliably identify short-term momentum setups.
 
 ---
 
@@ -30,55 +30,37 @@ Pipeline/
 
 ---
 
-## Core Components & Engineering Rationale
+## How It Works (And Why It Was Built This Way)
 
 ### 1. Data Ingestion & Caching (`options_pipeline.py`)
 
-* **Databento (OPRA.PILLAR):** We use Databento to pull raw binary tick data. This provides exact nanosecond-precision timestamps for options trades, which is necessary for aligning high-frequency options flow with standard 1-minute equity bars.
-* **Polars for Aggregation:** Because tick data is massive, we use Polars instead of Pandas. Polars is built on Rust and uses multi-threading to process millions of rows significantly faster, preventing memory bottlenecks during feature engineering.
-* **Local Parquet Caching:** The script saves the initial raw data pull as a compressed `.parquet` file. This prevents the system from having to re-download gigabytes of data every time the script is run, saving time and API costs.
+* **Nanosecond Precision:** To accurately align options flow with 1-minute equity bars, you need exact timestamps. The pipeline uses Databento to pull OPRA binary tick data, providing the nanosecond resolution required for high-frequency analysis.
+* **Beating Memory Bottlenecks:** Options tick data is notoriously massive, and standard Pandas DataFrames often choke on it. The script leverages Polars—a DataFrame library built on Rust—to utilize multi-threading and process millions of rows without crashing system memory.
+* **Parquet Caching:** Downloading gigabytes of raw data on every test run is slow and expensive. The script automatically caches initial pulls locally as compressed `.parquet` files to drastically speed up feature engineering iteration.
 
 ### 2. Path-Dependent Target Engineering
 
-* **Filtering "Ghost MFE":** In traditional backtesting, models often calculate the Maximum Favorable Excursion (MFE)—the absolute peak price an asset reached after a signal. However, if the asset dropped 5% before reaching that peak, a real trader would have been stopped out. This is "Ghost MFE."
-* **Trailing Stop-Loss:** To fix this, our target variable is path-dependent. We simulate a strict 0.5% trailing stop-loss on the historical data. If the asset hits the stop-loss before generating a return, the target is capped at a loss. This forces the model to learn which setups survive the execution path.
+* **The "Ghost MFE" Trap:** A common flaw in backtesting is calculating Maximum Favorable Excursion (MFE)—the absolute peak price an asset reached after a buy signal. But if the asset dropped 5% *before* rocketing up 10%, a real trader would have stopped out. Giving a model credit for that unreachable peak creates "Ghost MFE."
+* **Enforcing Reality:** To fix this, the target variable in this pipeline is path-dependent. It simulates a strict 0.5% trailing stop-loss directly on the historical tape. If the price path hits the stop-loss before generating a return, the target records a loss. This forces the model to learn which setups actually survive the execution path.
 
 ### 3. Walk-Forward Cross-Validation (`model_training.py`)
 
-* **TimeSeriesSplit:** Standard machine learning validation scrambles data randomly, which allows the model to use "future" data to predict the past. We use Scikit-learn's `TimeSeriesSplit` to enforce a strict chronological expanding window. The model only ever trains on past data to predict unseen future data.
-* **Algorithm Selection:** We use an XGBoost Regressor to predict trade expectancy. XGBoost is highly efficient for tabular numerical data. We intentionally limit the tree depth (`max_depth=3`) to prevent the model from over-fitting to the inevitable noise of high-frequency market data.
+* **Preventing Look-Ahead Bias:** Randomly shuffling time-series data for cross-validation ruins the timeline, allowing the model to accidentally learn from "future" data. The pipeline uses Scikit-learn's `TimeSeriesSplit` to enforce a chronological expanding window, ensuring the model is only ever trained on past events to predict unseen future events.
+* **Managing Noise:** Financial data is incredibly noisy. We use an XGBoost Regressor for its efficiency with tabular data, but intentionally restrict the tree depth (`max_depth=3`). This acts as a regularizer, preventing the algorithm from memorizing the noise and overfitting the training set.
 
 ### 4. Live Execution Bridge (`live_execution.py`)
 
-* **Dual-Broker Architecture:** The pipeline leverages Alpaca WebSockets for high-throughput, latency-sensitive equity data feeds while utilizing Interactive Brokers (IBKR Gateway) strictly for institutional order routing and portfolio management.
-* **Thread Safety & Daemonization:** The Alpaca stream is decoupled into a background daemon thread. This isolates the blocking WebSocket stream from the core `asyncio` event loop, preventing `ib_async` collisions and eliminating "zombie" processes during graceful `Ctrl+C` shutdowns.
-* **Non-Blocking State Synchronization:** Account liquidity is continuously cached in the background using direct low-level socket requests (`ib.client.reqAccountUpdates`). This bypasses aggressive broker API rate limits and provides instant read-access for the execution logic without halting the event loop.
-* **Dynamic Sizing & Bracket Routing:** Capital is dynamically deployed (bounded between a 30% base and 95% maximum) using linear scaling against the predicted EV. Orders are routed as bracket sequences (Market Entry + GTC Trailing Stop) equipped with automated local CSV logging for out-of-sample forward testing validation.
+* **Separation of Concerns:** Moving from a Jupyter notebook to live execution requires managing API limits and latency. This script splits the workload: Alpaca WebSockets stream the high-throughput equity pricing, while the Interactive Brokers Gateway (IBKR) handles the actual order routing and portfolio logic.
+* **Thread Safety:** Blocking WebSockets can easily crash Python's `asyncio` event loop. By wrapping the Alpaca stream in a background daemon thread, it isolates the connection. This prevents loop collisions and automatically kills "zombie" processes during a graceful `Ctrl+C` shutdown.
+* **Bypassing Rate Limits:** IBKR heavily restricts how often you can request account snapshots. Instead of polling, the script uses a low-level socket request (`ib.client.reqAccountUpdates`) to quietly cache liquidity updates in the background. This gives the execution logic instant access to account balances without halting the event loop.
+* **Dynamic Sizing:** Position sizes scale linearly based on the expected value (EV) predicted by the model. When a signal clears the confidence threshold, the script fires a bracket order (Market Entry + GTC Trailing Stop) and logs the trade to a local CSV to track out-of-sample forward testing.
 
 ---
 
-## Model Validation & Risk Summary
+## Strategy Limitations & Risk Profile
 
-### 1. Initial Thesis & Conceptual Soundness
-
-* **Economic Rationale:** High-frequency options market microstructure acts as a leading indicator. Sudden imbalances in put/call ratios and anomalous call volume shocks reflect aggressive directional positioning prior to equity price discovery.
-* **Risk & Limitations:** The strategy is vulnerable to liquidity gaps and spread widening during major macroeconomic news releases. Furthermore, high-frequency signals can decay rapidly, meaning execution latency is a primary risk factor. Absolute returns may also trail passive benchmark holding strategies strictly due to the aggressive risk-management parameters (0.5% stop-loss) dampening top-end volatility.
-
-### 2. General Model Description
-
-* **Target Engineering:** The target variable is the realized percentage return, strictly bounded by a 0.5% trailing stop-loss constraint to accurately reflect live execution.
-* **Feature Space:**
-* `opt_put_call_ratio`: The rolling 1-minute volume ratio of put versus call options contracts.
-* `opt_call_shock`: The normalized deviation of call volume relative to baseline historical averages.
-
-
-* **Algorithm:** XGBoost Regressor optimized for Expected Value (EV) estimation.
-
-### 3. Code Implementation & Architecture
-
-* **`src/options_pipeline.py`:** Handles the API requests, manages local data caching, and performs the mathematical aggregations required to map options trades to equity timestamps.
-* **`src/model_training.py`:** Conducts the expanding-window cross-validation, generates the error metrics (MAE), and exports the final fitted model for production use.
-* **`src/live_execution.py`:** Manages the real-time continuous loop, evaluating incoming data against the model, calculating dynamic capital allocations, and securely pushing bracket execution instructions to the broker API.
+* **Market Mechanics:** No model is immune to physical market realities. This specific strategy relies on high-frequency signals that decay rapidly, making it highly sensitive to execution latency, liquidity gaps, and spread widening during macroeconomic news events.
+* **Absolute Returns vs. Risk Parity:** Because the pipeline relies on a tight 0.5% trailing stop to protect capital, it is designed to get stopped out frequently. Consequently, the absolute returns will likely underperform a simple passive "buy-and-hold" strategy during massive, volatile bull runs. The trade-off is significant downside protection and capital preservation during choppy or bearish regimes.
 
 ```
 
